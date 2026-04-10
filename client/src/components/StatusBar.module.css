@@ -1,0 +1,38 @@
+.bar {
+  position: fixed;
+  inset: 5.7rem 1.5rem auto;
+  z-index: 35;
+}
+
+.inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 50px;
+  max-width: min(980px, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background: rgba(26, 26, 46, 0.76);
+  backdrop-filter: blur(16px);
+  color: #d7e2f6;
+  padding: 0.8rem 1rem;
+}
+
+.spinner {
+  color: #00d4aa;
+  animation: spin 0.9s linear infinite;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #00d4aa;
+  box-shadow: 0 0 0 6px rgba(0, 212, 170, 0.12);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

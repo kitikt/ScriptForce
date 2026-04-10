@@ -1,0 +1,127 @@
+.panel {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(26, 26, 46, 0.95), rgba(12, 12, 22, 0.98));
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.35);
+  padding: 1.5rem;
+}
+
+.grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 1.2rem;
+}
+
+.scriptCard {
+  padding-bottom: 1rem;
+}
+
+.heading {
+  display: flex;
+  gap: 0.85rem;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+
+.heading h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.heading p {
+  margin: 0.35rem 0 0;
+  color: #97a1b8;
+  line-height: 1.6;
+}
+
+.icon {
+  color: #00d4aa;
+  flex: 0 0 auto;
+  margin-top: 0.15rem;
+}
+
+.selectWrap {
+  position: relative;
+}
+
+.select,
+.input,
+.textarea {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  background: rgba(10, 10, 15, 0.85);
+  color: #eef5ff;
+  font: inherit;
+  padding: 0.95rem 1rem;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.select:focus,
+.input:focus,
+.textarea:focus {
+  border-color: rgba(0, 212, 170, 0.8);
+  box-shadow: 0 0 0 4px rgba(0, 212, 170, 0.12);
+}
+
+.select {
+  appearance: none;
+  padding-right: 3rem;
+}
+
+.selectIcon {
+  position: absolute;
+  right: 1rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #7d89a8;
+  pointer-events: none;
+}
+
+.textarea {
+  min-height: 50vh;
+  resize: vertical;
+  line-height: 1.7;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1.25rem;
+}
+
+.button {
+  border: none;
+  border-radius: 16px;
+  background: #00d4aa;
+  color: #031312;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.96rem;
+  font-weight: 700;
+  padding: 1rem 1.35rem;
+  cursor: pointer;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.button:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.helperText {
+  margin: 0.8rem 0 0;
+  color: #ff9a9a;
+  line-height: 1.6;
+}

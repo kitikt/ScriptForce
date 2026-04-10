@@ -1,0 +1,85 @@
+.card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  background: rgba(26, 26, 46, 0.92);
+  padding: 1.2rem;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.header h3 {
+  margin: 0.2rem 0 0;
+  font-size: 1rem;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.eyebrow {
+  margin: 0;
+  color: #00d4aa;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.72rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #eef5ff;
+  font: inherit;
+  padding: 0.7rem 0.85rem;
+  cursor: pointer;
+}
+
+.body {
+  margin: 1rem 0 0;
+  border-radius: 18px;
+  background: rgba(8, 8, 13, 0.82);
+  color: #c4cce0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  line-height: 1.7;
+  padding: 1rem;
+  white-space: pre-wrap;
+  overflow: hidden;
+}
+
+.expanded {
+  max-height: 400px;
+  overflow: auto;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.8rem;
+  color: #7f88a3;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 680px) {
+  .header {
+    flex-direction: column;
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+}
