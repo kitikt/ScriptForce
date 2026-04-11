@@ -34,10 +34,17 @@ function emitLog(socket, message) {
   });
 }
 
-function emitUrlLog(socket, message) {
+function emitUrlLog(socket, page) {
+  let currentUrl = 'unknown';
+  try {
+    currentUrl = page.url();
+  } catch (error) {
+    currentUrl = `unavailable (${error.message})`;
+  }
+
   emitSocketEvent(socket, 'log', {
     time: new Date().toISOString(),
-    message,
+    message: '↳ URL: ' + currentUrl,
   });
 }
 
@@ -70,16 +77,21 @@ async function executeStep(page, step, config, socket) {
           socket,
           `Claude timeout at step ${stepNumber}. Retrying attempt ${attempt}/${STEP_TIMEOUT_RETRY_LIMIT}.`
         );
+        emitUrlLog(socket, page);
       }
 
       const prompt = step.buildPrompt(config.originalScript);
       emitLog(socket, `Sending prompt for step ${stepNumber}: ${stepName}`);
+      emitUrlLog(socket, page);
       await sendMessage(page, prompt);
-      emitUrlLog(socket, 'Message sent. Current URL: ' + page.url());
+      emitLog(socket, 'Message sent.');
+      emitUrlLog(socket, page);
 
       emitLog(socket, `Waiting for Claude response at step ${stepNumber}: ${stepName}`);
+      emitUrlLog(socket, page);
       const response = await waitForResponse(page);
-      emitUrlLog(socket, 'Response received. Current URL: ' + page.url());
+      emitLog(socket, 'Response received.');
+      emitUrlLog(socket, page);
       return response;
     } catch (error) {
       if (isClaudeTimeoutError(error) && attempt < STEP_TIMEOUT_RETRY_LIMIT) {
@@ -130,16 +142,21 @@ async function runPipeline(page, config, socket) {
     ensurePageAvailable(page);
     console.log('[Pipeline] Starting pipeline with config:', config);
     emitLog(socket, 'Pipeline started.');
+    emitUrlLog(socket, page);
 
     emitSocketEvent(socket, 'status', 'Navigating to project...');
     emitLog(socket, `Navigating to project: ${config.projectUrl}`);
+    emitUrlLog(socket, page);
     await navigateToProject(page, config.projectUrl);
-    emitUrlLog(socket, 'Current URL: ' + page.url());
+    emitLog(socket, 'Project navigation finished.');
+    emitUrlLog(socket, page);
 
     emitSocketEvent(socket, 'status', 'Selecting model...');
     emitLog(socket, `Selecting model: ${config.modelName}`);
+    emitUrlLog(socket, page);
     await selectModel(page, config.modelName);
-    emitUrlLog(socket, 'Current URL: ' + page.url());
+    emitLog(socket, 'Model selection finished.');
+    emitUrlLog(socket, page);
 
     for (const step of STEPS) {
       const { stepNumber, name: stepName } = step;
@@ -147,6 +164,7 @@ async function runPipeline(page, config, socket) {
       try {
         console.log(`[Pipeline] Starting step ${stepNumber}: ${stepName}`);
         emitLog(socket, `Step ${stepNumber} started: ${stepName}`);
+        emitUrlLog(socket, page);
         emitSocketEvent(socket, 'step_start', { stepNumber, stepName });
 
         const result = await executeStep(page, step, config, socket);
@@ -162,21 +180,26 @@ async function runPipeline(page, config, socket) {
           result,
         });
         emitLog(socket, `Step ${stepNumber} completed: ${stepName}`);
+        emitUrlLog(socket, page);
 
         if (stepNumber === 1 && config.chatName) {
           emitSocketEvent(socket, 'status', 'Renaming chat...');
           emitLog(socket, `Renaming chat to: ${config.chatName}`);
+          emitUrlLog(socket, page);
           await renameChat(page, config.chatName);
-          emitUrlLog(socket, 'Current URL: ' + page.url());
+          emitLog(socket, 'Chat rename finished.');
+          emitUrlLog(socket, page);
         }
 
         if (stepNumber < STEPS.length) {
           emitLog(socket, 'Waiting before next step...');
+          emitUrlLog(socket, page);
           await randomStepDelay();
         }
       } catch (error) {
         console.error(`[Pipeline] Step ${stepNumber} failed:`, error);
         emitLog(socket, `Step ${stepNumber} failed: ${error.message}`);
+        emitUrlLog(socket, page);
         emitSocketEvent(socket, 'error', {
           stepNumber,
           error: error.message,
@@ -187,6 +210,7 @@ async function runPipeline(page, config, socket) {
 
     console.log('[Pipeline] Pipeline completed successfully.');
     emitLog(socket, 'Pipeline completed successfully.');
+    emitUrlLog(socket, page);
     emitSocketEvent(socket, 'pipeline_done', results);
 
     return results;

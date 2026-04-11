@@ -571,96 +571,93 @@ async function extractLatestResponseText(page) {
 }
 
 async function waitForResponse(page) {
-  try {
-    console.log('[Claude] Waiting for response...');
+  console.log('[Claude] Waiting for response (baseline mode)...');
+  var maxWait = 15 * 60 * 1000;
+  var interval = 3000;
+  var elapsed = 0;
+  var lastNewText = '';
+  var stableCount = 0;
+  var retryCount = 0;
 
-    await page.waitForFunction(
-      () => {
-        const bodyText = document.body.innerText || '';
-        const hasGeneratingState = /Stop generating/i.test(bodyText);
-        const hasContinueState = /Continue generating/i.test(bodyText);
-        const hasResponseNode = Array.from(
-          document.querySelectorAll(
-            'main article, main [data-testid*="message"], main [class*="prose"], main [class*="markdown"]'
-          )
-        ).some((element) => (element.innerText || '').trim().length > 0);
+  // Lay baseline: toan bo text tren page truoc khi response xuat hien.
+  var baselineLength = await page.evaluate(function() {
+    return (document.body.innerText || '').length;
+  });
+  console.log('[Claude] Baseline text length: ' + baselineLength);
 
-        return hasGeneratingState || hasContinueState || hasResponseNode;
-      },
-      { timeout: RESPONSE_TIMEOUT_MS }
-    );
+  await new Promise(function(r) { setTimeout(r, 5000); });
 
-    const deadline = Date.now() + RESPONSE_TIMEOUT_MS;
-    let retryCount = 0;
-    let latestText = '';
-
-    while (Date.now() < deadline) {
-      const retryButton = await findRetryButton(page);
-
-      if (retryButton) {
-        if (retryCount >= MAX_RESPONSE_RETRIES) {
-          throw new Error('Claude response failed after maximum retries.');
-        }
-
-        retryCount += 1;
-        console.log(`[Claude] Retry detected, attempting retry ${retryCount}/${MAX_RESPONSE_RETRIES}...`);
-        await retryButton.click();
-        await randomDelay();
+  while (elapsed < maxWait) {
+    try {
+      var retryBtn = await page.$('button:has-text("Retry"), button:has-text("Try again")');
+      if (retryBtn && retryCount < 2) {
+        console.log('[Claude] Clicking retry...');
+        await retryBtn.click();
+        retryCount++;
+        await new Promise(function(r) { setTimeout(r, 5000); });
+        stableCount = 0;
+        lastNewText = '';
+        elapsed += 5000;
         continue;
       }
 
-      if (await hasStopGenerating(page)) {
-        console.log('[Claude] Response is still generating...');
-
-        await page.waitForFunction(
-          () => !/Stop generating/i.test(document.body.innerText || ''),
-          { timeout: Math.max(deadline - Date.now(), 1000) }
-        );
-
-        console.log('[Claude] Generation stopped, waiting for final text...');
-        await sleep(3000);
-      }
-
-      const continueButton = await findContinueGeneratingButton(page);
-
-      if (continueButton) {
-        console.log('[Claude] Continue generating detected, clicking...');
-        await continueButton.click();
-        await randomDelay();
+      var stopBtn = await page.$('button[aria-label="Stop Response"], button:has-text("Stop")');
+      if (stopBtn) {
+        stableCount = 0;
+        elapsed += interval;
+        await new Promise(function(r) { setTimeout(r, interval); });
         continue;
       }
 
-      latestText = await extractLatestResponseText(page);
-
-      if (latestText) {
-        console.log('[Claude] Response text captured, checking stability...');
-        await sleep(3000);
-
-        if (await hasStopGenerating(page)) {
-          continue;
-        }
-
-        const continueAgain = await findContinueGeneratingButton(page);
-
-        if (continueAgain) {
-          console.log('[Claude] Continue generating appeared again, clicking...');
-          await continueAgain.click();
-          await randomDelay();
-          continue;
-        }
-
-        console.log('[Claude] Final response detected.');
-        return latestText;
+      var continueBtn = await page.$('button:has-text("Continue")');
+      if (continueBtn) {
+        console.log('[Claude] Clicking Continue...');
+        await continueBtn.click();
+        await new Promise(function(r) { setTimeout(r, 3000); });
+        stableCount = 0;
+        elapsed += 3000;
+        continue;
       }
 
-      await sleep(1000);
+      // Lay text moi: phan text dai hon baseline.
+      var currentNewText = await page.evaluate(function(bl) {
+        var bodyText = document.body.innerText || '';
+        if (bodyText.length > bl + 100) {
+          return bodyText.substring(bl);
+        }
+        return '';
+      }, baselineLength);
+
+      if (currentNewText.length > 100 && currentNewText === lastNewText) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+        if (currentNewText.length > 0) lastNewText = currentNewText;
+      }
+
+      // Text moi on dinh 3 lan (9 giay) = response xong.
+      if (stableCount >= 3 && lastNewText.length > 100) {
+        console.log('[Claude] Response done. New text length: ' + lastNewText.length);
+        return lastNewText;
+      }
+
+    } catch (e) {
+      console.log('[Claude] Poll error (ignoring)');
     }
 
-    throw new Error('Timed out waiting for Claude response.');
-  } catch (error) {
-    console.warn('[Claude] waitForResponse failed:', error.message);
-    throw error;
+    elapsed += interval;
+    await new Promise(function(r) { setTimeout(r, interval); });
+
+    if (elapsed % 30000 === 0) {
+      console.log('[Claude] Still waiting... ' + Math.round(elapsed/1000) + 's, new text: ' + lastNewText.length + ' chars');
+    }
   }
+
+  if (lastNewText.length > 100) {
+    console.log('[Claude] Timeout but has new text. Length: ' + lastNewText.length);
+    return lastNewText;
+  }
+  throw new Error('Response timeout after 15 minutes');
 }
 
 async function handleContextLimit(page, socket) {

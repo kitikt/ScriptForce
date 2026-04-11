@@ -3,7 +3,6 @@ import { io } from 'socket.io-client'
 
 import ConfigPanel from './components/ConfigPanel'
 import ExportButton from './components/ExportButton'
-import Header from './components/Header'
 import StatusBar from './components/StatusBar'
 import StepProgress from './components/StepProgress'
 import TerminalLog from './components/TerminalLog'
@@ -207,11 +206,20 @@ function App() {
     socketRef.current.emit('start_pipeline', config)
   }
 
+  const handleClearLogs = () => {
+    setLogs([
+      createLogEntry('Terminal cleared.', new Date().toISOString()),
+    ])
+  }
+
   const sortedSteps = [...steps].sort((a, b) => a.stepNumber - b.stepNumber)
 
   return (
     <div className={styles.appShell}>
-      <Header />
+      <div className={`${styles.orb} ${styles.orbTopLeft}`} />
+      <div className={`${styles.orb} ${styles.orbCenterRight}`} />
+      <div className={`${styles.orb} ${styles.orbBottomLeft}`} />
+
       <StatusBar
         message={statusMessage}
         processing={phase === 'login' || phase === 'running'}
@@ -273,7 +281,12 @@ function App() {
             </div>
 
             <div className={styles.resultsPane}>
-              <TerminalLog logs={logs} />
+              <TerminalLog
+                logs={logs}
+                onClear={handleClearLogs}
+                currentStep={currentStep}
+                totalSteps={STEP_DEFINITIONS.length}
+              />
             </div>
           </section>
         )}
