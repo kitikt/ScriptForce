@@ -23,7 +23,7 @@ body,
 body {
   margin: 0;
   min-height: 100vh;
-  background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 50%, #0a0a1a 100%);
+  background: #0a0a0f;
   color: #f4f7fb;
   font-family: 'Outfit', sans-serif;
 }
@@ -33,6 +33,11 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+select option {
+  background: #10101d;
+  color: #f4f7fb;
 }
 
 a {

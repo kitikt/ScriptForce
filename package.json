@@ -5,6 +5,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "predev": "node scripts/clean-dev-ports.js",
+    "dev:clean": "node scripts/clean-dev-ports.js",
     "dev:client": "cd client && npm run dev",
     "dev:server": "cd server && node index.js",
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",

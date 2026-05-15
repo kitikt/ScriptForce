@@ -11,7 +11,7 @@ function StatusBar({ message, processing }) {
         ) : (
           <span className={styles.dot} />
         )}
-        <span>{message}</span>
+        <span className={styles.message} title={message}>{message}</span>
       </div>
     </div>
   )

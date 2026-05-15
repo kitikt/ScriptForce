@@ -2,7 +2,10 @@
   min-height: 100vh;
   position: relative;
   overflow-x: hidden;
-  background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 50%, #0a0a1a 100%);
+  background:
+    radial-gradient(circle at top left, rgba(0, 212, 170, 0.16), transparent 26%),
+    radial-gradient(circle at top right, rgba(0, 163, 255, 0.12), transparent 24%),
+    linear-gradient(180deg, #0d0d14 0%, #0a0a0f 45%, #08080d 100%);
   color: #f4f7fb;
 }
 
@@ -21,6 +24,7 @@
 
 .orb {
   position: fixed;
+  display: none;
   z-index: 0;
   width: 400px;
   height: 400px;
@@ -70,11 +74,9 @@
 .heroCard,
 .waitCard {
   width: min(760px, 100%);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 28px;
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: linear-gradient(180deg, rgba(26, 26, 46, 0.96), rgba(15, 15, 24, 0.98));
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.35);
   padding: 2.25rem;
 }

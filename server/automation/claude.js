@@ -1,6 +1,15 @@
+const fs = require('fs/promises');
+const path = require('path');
+
 const CLAUDE_ORIGIN = 'https://claude.ai';
-const RESPONSE_TIMEOUT_MS = 15 * 60 * 1000;
+const RESPONSE_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_RESPONSE_RETRIES = 2;
+const MIN_PARTIAL_RESPONSE_CHARS = 100;
+const MIN_FINAL_RESPONSE_CHARS = 240;
+const DEFAULT_MIN_RESPONSE_CHARS = 240;
+const SHORT_RESPONSE_ACCEPT_MS = 90 * 1000;
+const MIN_ARTIFACT_RESPONSE_CHARS = 2000;
+const ARTIFACT_EXPORT_DIR = path.join(__dirname, '..', 'exports');
 const CONTEXT_LIMIT_PATTERNS = [
   /context (window )?(is )?(full|too long|exceeded)/i,
   /conversation (is )?too long/i,
@@ -38,6 +47,14 @@ async function isLocatorVisible(locator, timeout = 1000) {
   }
 }
 
+async function isLocatorEnabled(locator, timeout = 1000) {
+  try {
+    return await locator.isEnabled({ timeout });
+  } catch {
+    return false;
+  }
+}
+
 async function findFirstVisibleLocator(locators) {
   for (const locator of locators) {
     const candidate = locator.first();
@@ -48,6 +65,14 @@ async function findFirstVisibleLocator(locators) {
   }
 
   return null;
+}
+
+async function findSendButton(page) {
+  return findFirstVisibleLocator([
+    page.getByRole('button', { name: /Send|Submit/i }),
+    page.locator('button[aria-label*="Send" i], button[title*="Send" i]'),
+    page.locator('button[aria-label*="Submit" i], button[title*="Submit" i]'),
+  ]);
 }
 
 async function findVisibleChatInput(page) {
@@ -81,11 +106,20 @@ async function hasVisibleText(page, patterns) {
 }
 
 async function findRetryButton(page) {
-  return findFirstVisibleLocator([
-    page.getByRole('button', { name: /Retry|Try again/i }),
-    page.locator('button[aria-label*="Retry"], button[aria-label*="Try again"]'),
-    page.getByText(/Retry|Try again/i),
-  ]);
+  const retryButtons = page.locator(
+    'main button, main [role="button"], button[aria-label*="Retry"], button[aria-label*="Try again"]'
+  ).filter({ hasText: /Retry|Try again/i });
+  const count = await retryButtons.count();
+
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const candidate = retryButtons.nth(index);
+
+    if (await isLocatorVisible(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 async function clickIfVisible(locator) {
@@ -265,7 +299,141 @@ async function navigateToProject(page, projectUrl) {
   }
 }
 
-async function selectModel(page, modelName) {
+async function findModelSelectorButton(page) {
+  return findFirstVisibleLocator([
+    page.getByRole('button', { name: /Sonnet|Opus|Haiku|Claude/i }),
+    page
+      .locator('button[aria-haspopup="menu"], button[aria-haspopup="listbox"]')
+      .filter({ hasText: /Sonnet|Opus|Haiku|Claude/i }),
+    page.locator('[data-testid*="model"] button'),
+  ]);
+}
+
+async function setAdaptiveThinking(page, enabled) {
+  try {
+    console.log(`[Claude] Setting adaptive thinking: ${enabled ? 'on' : 'off'}`);
+
+    const modelButton = await findModelSelectorButton(page);
+    if (!modelButton) {
+      console.warn('[Claude] Model selector button not found while setting adaptive thinking.');
+      return false;
+    }
+
+    await modelButton.click();
+    await randomDelay(500, 1200);
+
+    const result = await page.evaluate((desiredEnabled) => {
+      const isVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden'
+        );
+      };
+
+      const readCheckedState = (element) => {
+        if (!element) {
+          return null;
+        }
+
+        if (element.matches('input[type="checkbox"]')) {
+          return element.checked;
+        }
+
+        const ariaChecked = element.getAttribute('aria-checked');
+        if (ariaChecked === 'true') {
+          return true;
+        }
+        if (ariaChecked === 'false') {
+          return false;
+        }
+
+        const ariaPressed = element.getAttribute('aria-pressed');
+        if (ariaPressed === 'true') {
+          return true;
+        }
+        if (ariaPressed === 'false') {
+          return false;
+        }
+
+        const dataState = element.getAttribute('data-state');
+        if (dataState === 'checked' || dataState === 'on') {
+          return true;
+        }
+        if (dataState === 'unchecked' || dataState === 'off') {
+          return false;
+        }
+
+        return null;
+      };
+
+      const rows = Array.from(document.querySelectorAll('button, [role="switch"], [aria-checked], label, div'))
+        .filter((element) => {
+          const text = element.innerText || element.textContent || '';
+          return isVisible(element) && /Adaptive thinking/i.test(text) && text.length < 350;
+        })
+        .sort((a, b) => {
+          const aText = a.innerText || a.textContent || '';
+          const bText = b.innerText || b.textContent || '';
+          return aText.length - bText.length;
+        });
+
+      const row = rows[0];
+      if (!row) {
+        return { found: false, changed: false, alreadyCorrect: false };
+      }
+
+      const controls = [
+        row.matches('[role="switch"], [aria-checked], input[type="checkbox"], button') ? row : null,
+        row.querySelector('[role="switch"], [aria-checked], input[type="checkbox"], button'),
+        row.parentElement?.querySelector('[role="switch"], [aria-checked], input[type="checkbox"], button'),
+      ].filter(Boolean);
+
+      const control = controls.find((candidate) => readCheckedState(candidate) !== null) || controls[0] || row;
+      const currentState = readCheckedState(control);
+
+      if (currentState === desiredEnabled) {
+        return { found: true, changed: false, alreadyCorrect: true };
+      }
+
+      control.click();
+      return {
+        found: true,
+        changed: true,
+        alreadyCorrect: false,
+        previousState: currentState,
+      };
+    }, Boolean(enabled));
+
+    await randomDelay(500, 1200);
+    await page.keyboard.press('Escape').catch(() => {});
+
+    if (!result.found) {
+      console.warn('[Claude] Adaptive thinking toggle not found.');
+      return false;
+    }
+
+    console.log(
+      result.alreadyCorrect
+        ? '[Claude] Adaptive thinking already in requested state.'
+        : '[Claude] Adaptive thinking state updated.'
+    );
+    return true;
+  } catch (error) {
+    console.warn('[Claude] setAdaptiveThinking failed:', error.message);
+    return false;
+  }
+}
+
+async function selectModel(page, modelName, options = {}) {
   try {
     console.log(`[Claude] Selecting model: ${modelName}`);
 
@@ -280,13 +448,7 @@ async function selectModel(page, modelName) {
       modelPattern = /Sonnet/i;
     }
 
-    const modelButton = await findFirstVisibleLocator([
-      page.getByRole('button', { name: /Sonnet|Opus|Haiku|Claude/i }),
-      page
-        .locator('button[aria-haspopup="menu"], button[aria-haspopup="listbox"]')
-        .filter({ hasText: /Sonnet|Opus|Haiku|Claude/i }),
-      page.locator('[data-testid*="model"] button'),
-    ]);
+    const modelButton = await findModelSelectorButton(page);
 
     if (!modelButton) {
       console.warn('[Claude] Model selector button not found.');
@@ -315,6 +477,10 @@ async function selectModel(page, modelName) {
     console.log('[Claude] Clicking model option...');
     await modelOption.click();
     await randomDelay();
+
+    if (typeof options.adaptiveThinking === 'boolean') {
+      await setAdaptiveThinking(page, options.adaptiveThinking);
+    }
 
     return true;
   } catch (error) {
@@ -354,81 +520,413 @@ async function createNewChat(page) {
   }
 }
 
-async function renameChat(page, chatName) {
+async function verifyChatName(page, chatName, timeoutMs = 5000) {
+  const expectedName = String(chatName || '').trim();
+
+  if (!expectedName) {
+    return false;
+  }
+
   try {
-    console.log(`[Claude] Renaming chat to: ${chatName}`);
+    await page.waitForFunction(
+      (name) => {
+        const visibleText = document.body.innerText || '';
+        const titleText = document.title || '';
 
-    const editButton = await findFirstVisibleLocator([
-      page.getByRole('button', { name: /Rename|Edit title|Edit chat|Edit conversation/i }),
-      page.locator('button[aria-label*="Rename"], button[title*="Rename"]'),
-      page.locator('button[aria-label*="Edit"], button[title*="Edit"]'),
-    ]);
-
-    if (editButton) {
-      console.log('[Claude] Opening rename UI via edit button...');
-      await editButton.click();
-      await randomDelay();
-    } else {
-      const titleHeading = await findFirstVisibleLocator([
-        page.locator('main h1'),
-        page.locator('header h1'),
-        page.locator('h1'),
-      ]);
-
-      if (!titleHeading) {
-        console.warn('[Claude] Rename controls not found. Skipping rename.');
-        return false;
-      }
-
-      console.log('[Claude] Trying double-click on chat title...');
-      await titleHeading.dblclick();
-      await randomDelay();
-    }
-
-    const renameField = await findFirstVisibleLocator([
-      page.locator('[role="dialog"] input[type="text"]'),
-      page.locator('header input[type="text"]'),
-      page.locator('input[type="text"]'),
-      page.locator('[role="dialog"] textarea'),
-      page.locator('header [contenteditable="true"]'),
-      page.locator('[role="dialog"] [contenteditable="true"]'),
-    ]);
-
-    if (!renameField) {
-      console.warn('[Claude] Rename field not found. Skipping rename.');
-      return false;
-    }
-
-    const tagName = await renameField.evaluate((element) =>
-      element.tagName.toLowerCase()
+        return visibleText.includes(name) || titleText.includes(name);
+      },
+      expectedName,
+      { timeout: timeoutMs }
     );
-    const isContentEditable = await renameField.evaluate(
-      (element) => element.getAttribute('contenteditable') === 'true'
-    );
-
-    console.log('[Claude] Applying new chat name...');
-    await renameField.click();
-
-    if (tagName === 'input' || tagName === 'textarea') {
-      await renameField.fill('');
-      await renameField.fill(chatName);
-    } else if (isContentEditable) {
-      await page.keyboard.press('Control+A');
-      await page.keyboard.press('Backspace');
-      await renameField.evaluate((element, value) => {
-        element.innerHTML = '';
-        element.textContent = value;
-        element.dispatchEvent(new InputEvent('input', { bubbles: true }));
-      }, chatName);
-    } else {
-      console.warn('[Claude] Unsupported rename field type. Skipping rename.');
-      return false;
-    }
-
-    await page.keyboard.press('Enter');
-    await randomDelay();
 
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function renameChatViaApi(page, chatId, chatName) {
+  return page.evaluate(async function(payload) {
+    async function readResponseBody(response) {
+      try {
+        return (await response.text()).slice(0, 500);
+      } catch {
+        return '';
+      }
+    }
+
+    try {
+      var orgRes = await fetch('https://claude.ai/api/organizations', {
+        credentials: 'include'
+      });
+      var orgs = await orgRes.json();
+      var orgList = Array.isArray(orgs) ? orgs : [];
+      var attempts = [];
+
+      for (var orgIndex = 0; orgIndex < orgList.length; orgIndex += 1) {
+        var orgId = orgList[orgIndex]?.uuid;
+
+        if (!orgId) {
+          continue;
+        }
+
+        var baseUrl =
+          'https://claude.ai/api/organizations/' +
+          orgId +
+          '/chat_conversations/' +
+          payload.chatId;
+        var urls = [
+          baseUrl,
+          baseUrl + '/title',
+          baseUrl + '/name',
+        ];
+
+        var requestVariants = [
+          { method: 'PUT', body: { name: payload.chatName } },
+          { method: 'PATCH', body: { name: payload.chatName } },
+          { method: 'POST', body: { name: payload.chatName } },
+          { method: 'PUT', body: { title: payload.chatName } },
+          { method: 'PATCH', body: { title: payload.chatName } },
+          { method: 'POST', body: { title: payload.chatName } },
+          { method: 'PUT', body: { conversation: { name: payload.chatName } } },
+          { method: 'PATCH', body: { conversation: { name: payload.chatName } } },
+        ];
+
+        for (var urlIndex = 0; urlIndex < urls.length; urlIndex += 1) {
+          var url = urls[urlIndex];
+
+          for (var variantIndex = 0; variantIndex < requestVariants.length; variantIndex += 1) {
+            var variant = requestVariants[variantIndex];
+            var res = await fetch(url, {
+              method: variant.method,
+              credentials: 'include',
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+              body: JSON.stringify(variant.body)
+            });
+
+            var responseBody = await readResponseBody(res);
+            attempts.push({
+              orgId: orgId,
+              url: url.replace('https://claude.ai/api/organizations/' + orgId, '/api/organizations/{orgId}'),
+              method: variant.method,
+              bodyKeys: Object.keys(variant.body),
+              status: res.status,
+              ok: res.ok,
+              responseBody: responseBody,
+            });
+
+            if (res.ok) {
+              return {
+                success: true,
+                orgId: orgId,
+                url: url,
+                method: variant.method,
+                status: res.status,
+                responseBody: responseBody,
+                attempts: attempts,
+              };
+            }
+          }
+        }
+      }
+
+      return {
+        success: false,
+        error: 'No successful rename API response.',
+        attempts: attempts,
+      };
+    } catch (e) {
+      return { success: false, error: e.message, attempts: [] };
+    }
+  }, { chatId: chatId, chatName: chatName });
+}
+
+async function openChatTitleMenu(page) {
+  const directMenuButton = await findFirstVisibleLocator([
+    page.getByRole('button', { name: /Chat options|Conversation options|More options/i }),
+    page.locator('header button[aria-haspopup="menu"]'),
+    page.locator('header [role="button"][aria-haspopup="menu"]'),
+    page.locator('button[aria-haspopup="menu"]').filter({ hasNotText: /Share/i }),
+  ]);
+
+  if (directMenuButton) {
+    await directMenuButton.click();
+    await randomDelay(500, 1200);
+    return true;
+  }
+
+  const clickedTitleButton = await page.evaluate(() => {
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden'
+      );
+    };
+
+    const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
+      .filter((element) => {
+        if (!isVisible(element)) {
+          return false;
+        }
+
+        const text = (element.innerText || element.getAttribute('aria-label') || '').trim();
+        const rect = element.getBoundingClientRect();
+
+        return (
+          text.length > 0 &&
+          !/share|send|stop|continue|retry|new chat/i.test(text) &&
+          rect.top >= 80 &&
+          rect.top <= 180 &&
+          rect.left >= 60 &&
+          rect.width >= 80
+        );
+      })
+      .sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+
+        if (aRect.top !== bRect.top) {
+          return aRect.top - bRect.top;
+        }
+
+        return aRect.left - bRect.left;
+      });
+
+    const target = candidates[0];
+
+    if (!target) {
+      return false;
+    }
+
+    target.click();
+    return true;
+  });
+
+  if (clickedTitleButton) {
+    await randomDelay(500, 1200);
+    return true;
+  }
+
+  return false;
+}
+
+async function findRenameMenuItem(page) {
+  return findFirstVisibleLocator([
+    page.getByRole('menuitem', { name: /Rename|Edit title|Edit chat|Edit conversation/i }),
+    page.getByRole('button', { name: /Rename|Edit title|Edit chat|Edit conversation/i }),
+    page.locator('[role="menuitem"], [cmdk-item], button').filter({ hasText: /Rename|Edit title|Edit chat|Edit conversation/i }),
+    page.getByText(/Rename|Edit title|Edit chat|Edit conversation/i),
+  ]);
+}
+
+async function renameChatViaUi(page, chatName) {
+  console.log('[Claude] Trying UI rename fallback...');
+
+  const openedMenu = await openChatTitleMenu(page);
+  const renameMenuItem = openedMenu ? await findRenameMenuItem(page) : null;
+
+  if (renameMenuItem) {
+    await renameMenuItem.click();
+    await randomDelay(500, 1200);
+  } else {
+    if (openedMenu) {
+      await page.keyboard.press('Escape');
+      await sleep(300);
+    }
+
+    const titleHeading = await findFirstVisibleLocator([
+      page.locator('main h1'),
+      page.locator('header h1'),
+      page.locator('h1'),
+    ]);
+
+    if (!titleHeading) {
+      const didDoubleClickTitle = await page.evaluate(() => {
+        const isVisible = (element) => {
+          const rect = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden'
+          );
+        };
+
+        const candidates = Array.from(document.querySelectorAll('h1, h2, button, [role="button"], span, div'))
+          .filter((element) => {
+            if (!isVisible(element)) {
+              return false;
+            }
+
+            const text = (element.innerText || '').trim();
+            const rect = element.getBoundingClientRect();
+
+            return (
+              text.length >= 4 &&
+              text.length <= 120 &&
+              !/share|send|reply|sonnet|opus|haiku/i.test(text) &&
+              rect.top >= 80 &&
+              rect.top <= 180 &&
+              rect.left >= 60 &&
+              rect.width >= 80
+            );
+          })
+          .sort((a, b) => {
+            const aRect = a.getBoundingClientRect();
+            const bRect = b.getBoundingClientRect();
+
+            if (aRect.top !== bRect.top) {
+              return aRect.top - bRect.top;
+            }
+
+            return aRect.left - bRect.left;
+          });
+
+        const target = candidates[0];
+
+        if (!target) {
+          return false;
+        }
+
+        target.dispatchEvent(new MouseEvent('dblclick', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        }));
+        return true;
+      });
+
+      if (!didDoubleClickTitle) {
+        console.warn('[Claude] Rename UI controls not found.');
+        return false;
+      }
+    } else {
+      console.log('[Claude] Rename menu not found. Trying double-click title...');
+      await titleHeading.dblclick();
+    }
+
+    await randomDelay(500, 1200);
+  }
+
+  const renameField = await findFirstVisibleLocator([
+    page.locator('input:focus'),
+    page.locator('textarea:focus'),
+    page.locator('[contenteditable="true"]:focus'),
+    page.locator('[role="dialog"] input[type="text"]'),
+    page.locator('[role="dialog"] textarea'),
+    page.locator('[role="dialog"] [contenteditable="true"]'),
+    page.locator('header input[type="text"]'),
+    page.locator('header textarea'),
+    page.locator('header [contenteditable="true"]'),
+    page.locator('input[type="text"]').filter({ hasNotText: /Search/i }),
+  ]);
+
+  if (!renameField) {
+    console.warn('[Claude] Rename UI field not found.');
+    return false;
+  }
+
+  console.log('[Claude] Applying chat rename in UI...');
+  const tagName = await renameField.evaluate((element) =>
+    element.tagName.toLowerCase()
+  );
+  const isContentEditable = await renameField.evaluate(
+    (element) => element.getAttribute('contenteditable') === 'true'
+  );
+
+  await renameField.click();
+
+  if (tagName === 'input' || tagName === 'textarea') {
+    await renameField.fill('');
+    await renameField.fill(chatName);
+  } else if (isContentEditable) {
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Backspace');
+    await renameField.evaluate((element, value) => {
+      element.innerHTML = '';
+      element.textContent = value;
+      element.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    }, chatName);
+  } else {
+    console.warn('[Claude] Unsupported rename UI field type:', tagName);
+    return false;
+  }
+
+  await sleep(500);
+
+  const saveButton = await findFirstVisibleLocator([
+    page.getByRole('button', { name: /Save|Done|Update|Confirm/i }),
+    page.locator('button').filter({ hasText: /Save|Done|Update|Confirm/i }),
+  ]);
+
+  if (saveButton) {
+    await saveButton.click();
+  } else {
+    await page.keyboard.press('Enter');
+  }
+
+  await sleep(1500);
+  return await verifyChatName(page, chatName, 5000);
+}
+
+async function renameChat(page, chatName) {
+  try {
+    console.log('[Claude] Renaming chat to:', chatName);
+
+    var currentUrl = page.url();
+    var chatIdMatch = currentUrl.match(/\/chat\/([a-f0-9-]+)/);
+    if (!chatIdMatch) {
+      console.warn('[Claude] Cannot find chat ID in URL:', currentUrl);
+      return false;
+    }
+    var chatId = chatIdMatch[1];
+
+    var result = await renameChatViaApi(page, chatId, chatName);
+    var apiAccepted = false;
+
+    if (result.success) {
+      apiAccepted = true;
+      console.log(
+        '[Claude] Chat renamed successfully via API:',
+        result.method,
+        result.status
+      );
+
+      await sleep(1500);
+
+      if (await verifyChatName(page, chatName, 3000)) {
+        return true;
+      }
+
+      console.warn('[Claude] Rename API returned success but visible title was not updated.');
+    }
+
+    if (apiAccepted) {
+      console.warn('[Claude] Trying UI fallback because Claude.ai did not refresh the visible title yet.');
+    } else {
+      console.warn(
+        '[Claude] Rename API failed:',
+        result.error || JSON.stringify(result.attempts?.slice(-2))
+      );
+    }
+
+    const uiRenamed = await renameChatViaUi(page, chatName);
+
+    if (uiRenamed) {
+      console.log('[Claude] Chat renamed successfully via UI fallback.');
+    }
+
+    return uiRenamed;
   } catch (error) {
     console.warn('[Claude] renameChat failed:', error.message);
     return false;
@@ -438,6 +936,9 @@ async function renameChat(page, chatName) {
 async function sendMessage(page, text) {
   try {
     console.log('[Claude] Sending message...');
+    const responseBaseline = await getLatestResponseSnapshot(page);
+    responseBaseline.submittedText = text;
+    responseBaseline.artifactSignature = await getVisibleArtifactSignature(page);
 
     const input = await findVisibleChatInput(page);
 
@@ -478,12 +979,7 @@ async function sendMessage(page, text) {
     await sleep(1000);
 
     console.log('[Claude] Looking for send button...');
-    const sendButton = await findFirstVisibleLocator([
-      page.getByRole('button', { name: /Send/i }),
-      page.locator('button[aria-label*="Send"]'),
-      page.locator('button[title*="Send"]'),
-      page.locator('button:has(svg)').filter({ hasNotText: /Stop generating/i }),
-    ]);
+    const sendButton = await findSendButton(page);
 
     if (sendButton) {
       console.log('[Claude] Clicking send button...');
@@ -499,6 +995,7 @@ async function sendMessage(page, text) {
     }
 
     await sleep(2000);
+    return responseBaseline;
   } catch (error) {
     console.warn('[Claude] sendMessage failed:', error.message);
     throw error;
@@ -507,157 +1004,1221 @@ async function sendMessage(page, text) {
 
 async function hasStopGenerating(page) {
   const stopButton = await findFirstVisibleLocator([
-    page.getByRole('button', { name: /Stop generating/i }),
-    page.locator('button[aria-label*="Stop generating"]'),
-    page.getByText(/Stop generating/i),
+    page.getByRole('button', { name: /Stop(?: generating| response)?|Cancel/i }),
+    page.locator('button[aria-label*="Stop" i], button[title*="Stop" i]'),
+    page.locator('button, [role="button"]').filter({ hasText: /^Stop(?: generating| response)?$/i }),
+    page.getByText(/Stop generating|Stop response/i),
   ]);
 
   return Boolean(stopButton);
 }
 
+async function getGenerationControlState(page) {
+  const [stopVisible, composerState] = await Promise.all([
+    hasStopGenerating(page),
+    getComposerState(page),
+  ]);
+  const sendButton = await findSendButton(page);
+  const sendVisible = Boolean(sendButton);
+  const sendEnabled = sendButton ? await isLocatorEnabled(sendButton) : false;
+
+  return {
+    stopVisible,
+    sendVisible,
+    sendEnabled,
+    composerReady: composerState.available,
+    composerText: composerState.text,
+  };
+}
+
+async function getComposerState(page) {
+  try {
+    return await page.evaluate(() => {
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden'
+        );
+      };
+
+      const composers = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+        .filter((element) => isVisible(element));
+      const composer = composers[composers.length - 1];
+
+      if (!composer) {
+        return {
+          available: false,
+          text: '',
+          disabled: true,
+          ariaDisabled: '',
+          inert: false,
+          pointerEvents: '',
+        };
+      }
+
+      const style = window.getComputedStyle(composer);
+      const disabledContainer = composer.closest('[aria-disabled="true"], [disabled], [inert]');
+
+      return {
+        available: !disabledContainer && style.pointerEvents !== 'none',
+        text: (composer.innerText || composer.textContent || '').trim(),
+        disabled: Boolean(disabledContainer),
+        ariaDisabled: composer.getAttribute('aria-disabled') || '',
+        inert: Boolean(composer.closest('[inert]')),
+        pointerEvents: style.pointerEvents,
+      };
+    });
+  } catch {
+    return {
+      available: false,
+      text: '',
+      disabled: true,
+      ariaDisabled: '',
+      inert: false,
+      pointerEvents: '',
+    };
+  }
+}
+
+function normalizeArtifactText(value) {
+  return String(value || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim();
+}
+
+function isUsableArtifactText(text, options = {}) {
+  const normalized = normalizeArtifactText(text);
+  const minChars = Math.max(
+    MIN_ARTIFACT_RESPONSE_CHARS,
+    Math.min(Number(options.minResponseChars || 0), 8000)
+  );
+  const wordCount = (normalized.match(/\S+/g) || []).length;
+
+  if (normalized.length < minChars || wordCount < 250) {
+    return false;
+  }
+
+  if (
+    normalized.length < 5000 &&
+    /Download as \.txt|Add to project|Print as PDF|Publish artifact|Write a message/i.test(normalized)
+  ) {
+    return false;
+  }
+
+  const chatText = normalizeArtifactText(options.chatText);
+  if (chatText && normalized === chatText) {
+    return false;
+  }
+
+  return true;
+}
+
+async function getVisibleArtifactSignature(page) {
+  try {
+    return await page.evaluate(() => {
+      const normalizeText = (value) =>
+        String(value || '')
+          .replace(/\r/g, '')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n[ \t]+/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+
+      const isVisibleBox = (rect) =>
+        rect && rect.width > 0 && rect.height > 0;
+
+      const isElementVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          isVisibleBox(rect) &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden'
+        );
+      };
+
+      const viewportWidth =
+        window.innerWidth || document.documentElement.clientWidth || 0;
+      const minLeft = viewportWidth * 0.45;
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      const pieces = [];
+      const seen = new Set();
+
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const parent = node.parentElement;
+
+        if (
+          !parent ||
+          !isElementVisible(parent) ||
+          parent.closest('[contenteditable="true"], nav, header, footer, script, style, noscript')
+        ) {
+          continue;
+        }
+
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const rects = Array.from(range.getClientRects());
+        const isRightPanelText = rects.some((rect) =>
+          isVisibleBox(rect) && rect.left >= minLeft
+        );
+
+        if (!isRightPanelText) {
+          continue;
+        }
+
+        const text = normalizeText(node.nodeValue);
+        if (!text || seen.has(text)) {
+          continue;
+        }
+
+        seen.add(text);
+        pieces.push(text);
+
+        if (pieces.join('\n').length > 4000) {
+          break;
+        }
+      }
+
+      const text = normalizeText(pieces.join('\n'));
+
+      if (
+        !text ||
+        (
+          text.length < 500 &&
+          !/Copy|TXT|Download as \.txt|Add to project|Print as PDF|Publish artifact/i.test(text)
+        )
+      ) {
+        return '';
+      }
+
+      return `${text.length}:${text.slice(0, 300)}:${text.slice(-300)}`;
+    });
+  } catch {
+    return '';
+  }
+}
+
+async function findArtifactCopyButton(page) {
+  const buttons = page
+    .locator('button, [role="button"]')
+    .filter({ hasText: /Copy/i });
+  const count = await buttons.count();
+  const viewport = page.viewportSize() || { width: 1600, height: 900 };
+  let best = null;
+
+  for (let index = 0; index < count; index += 1) {
+    const candidate = buttons.nth(index);
+
+    if (!(await isLocatorVisible(candidate, 500))) {
+      continue;
+    }
+
+    const box = await candidate.boundingBox().catch(() => null);
+    if (!box) {
+      continue;
+    }
+
+    const text = await candidate
+      .evaluate((element) => (element.innerText || element.textContent || '').trim())
+      .catch(() => '');
+    const aria = await candidate
+      .evaluate((element) => element.getAttribute('aria-label') || element.getAttribute('title') || '')
+      .catch(() => '');
+    const label = `${text} ${aria}`.trim();
+
+    if (!/Copy/i.test(label)) {
+      continue;
+    }
+
+    let score = box.x;
+    if (box.x >= viewport.width * 0.45) {
+      score += 5000;
+    }
+    if (box.y <= 180) {
+      score += 1500;
+    }
+    if (/^Copy$/i.test(text)) {
+      score += 1000;
+    }
+    if (box.width <= 140 && box.height <= 60) {
+      score += 300;
+    }
+
+    if (!best || score > best.score) {
+      best = { locator: candidate, box, score };
+    }
+  }
+
+  return best;
+}
+
+async function readClipboardText(page) {
+  return page.evaluate(async () => navigator.clipboard.readText());
+}
+
+async function tryCopyArtifactText(page, options = {}) {
+  try {
+    await page.context().grantPermissions(
+      ['clipboard-read', 'clipboard-write'],
+      { origin: CLAUDE_ORIGIN }
+    ).catch(() => {});
+
+    const copyButton = await findArtifactCopyButton(page);
+    if (!copyButton) {
+      return null;
+    }
+
+    const sentinel = `SCRIPTFORGE_CLIPBOARD_SENTINEL_${Date.now()}`;
+    await page.evaluate(async (value) => {
+      await navigator.clipboard.writeText(value);
+    }, sentinel).catch(() => {});
+
+    await copyButton.locator.click();
+    await sleep(700);
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const clipboardText = normalizeArtifactText(await readClipboardText(page).catch(() => ''));
+
+      if (
+        clipboardText &&
+        clipboardText !== sentinel &&
+        isUsableArtifactText(clipboardText, options)
+      ) {
+        return {
+          source: 'artifact-copy',
+          text: clipboardText,
+        };
+      }
+
+      await sleep(500);
+    }
+
+    return null;
+  } catch (error) {
+    console.warn('[Claude] Artifact copy extraction failed:', error.message);
+    return null;
+  }
+}
+
+async function findArtifactMenuButton(page, copyButtonInfo) {
+  if (!copyButtonInfo?.box) {
+    return null;
+  }
+
+  const buttons = page.locator('button, [role="button"]');
+  const count = await buttons.count();
+  const copyBox = copyButtonInfo.box;
+  let best = null;
+
+  for (let index = 0; index < count; index += 1) {
+    const candidate = buttons.nth(index);
+
+    if (!(await isLocatorVisible(candidate, 500))) {
+      continue;
+    }
+
+    const box = await candidate.boundingBox().catch(() => null);
+    if (!box) {
+      continue;
+    }
+
+    const sameRow =
+      Math.abs((box.y + box.height / 2) - (copyBox.y + copyBox.height / 2)) <= 12;
+    const rightOfCopy =
+      box.x >= copyBox.x + copyBox.width - 4 &&
+      box.x <= copyBox.x + copyBox.width + 80;
+
+    if (!sameRow || !rightOfCopy) {
+      continue;
+    }
+
+    const score = 1000 - Math.abs(box.x - (copyBox.x + copyBox.width));
+    if (!best || score > best.score) {
+      best = { locator: candidate, score };
+    }
+  }
+
+  return best?.locator || null;
+}
+
+async function tryDownloadArtifactText(page, options = {}) {
+  try {
+    const copyButton = await findArtifactCopyButton(page);
+    const menuButton = await findArtifactMenuButton(page, copyButton);
+
+    if (!menuButton) {
+      return null;
+    }
+
+    await menuButton.click();
+    await sleep(500);
+
+    const menuItem = await findFirstVisibleLocator([
+      page.getByRole('menuitem', { name: /Download as \.txt/i }),
+      page.getByRole('button', { name: /Download as \.txt/i }),
+      page.locator('[role="menuitem"], button, [cmdk-item]').filter({ hasText: /Download as \.txt/i }),
+      page.getByText(/Download as \.txt/i),
+    ]);
+
+    if (!menuItem) {
+      await page.keyboard.press('Escape').catch(() => {});
+      return null;
+    }
+
+    const downloadPromise = page.waitForEvent('download', { timeout: 8000 });
+    await menuItem.click();
+    const download = await downloadPromise;
+    const downloadPath = await download.path();
+
+    if (!downloadPath) {
+      return null;
+    }
+
+    const text = normalizeArtifactText(await fs.readFile(downloadPath, 'utf8'));
+
+    if (!isUsableArtifactText(text, options)) {
+      return null;
+    }
+
+    await fs.mkdir(ARTIFACT_EXPORT_DIR, { recursive: true }).catch(() => {});
+    const safeName = download
+      .suggestedFilename()
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+    const savedPath = path.join(
+      ARTIFACT_EXPORT_DIR,
+      `${Date.now()}_${safeName || 'claude-artifact.txt'}`
+    );
+    await fs.copyFile(downloadPath, savedPath).catch(() => {});
+
+    return {
+      source: 'artifact-download',
+      text,
+      path: savedPath,
+    };
+  } catch (error) {
+    console.warn('[Claude] Artifact download extraction failed:', error.message);
+    return null;
+  }
+}
+
+async function extractClaudeArtifactText(page, options = {}) {
+  const baselineSignature = options.baselineArtifactSignature || '';
+  const currentSignature = await getVisibleArtifactSignature(page);
+  const chatText = String(options.chatText || '');
+  const responseMentionsArtifact =
+    /artifact|txt|download|attached|saved|created.{0,60}file|generated.{0,60}file|file.{0,60}(?:created|saved|attached|generated)|t(?:a|\u1ea1)o file|d(?:a|\u00e3) t(?:a|\u1ea1)o/i.test(chatText);
+
+  if (!currentSignature) {
+    return null;
+  }
+
+  if (baselineSignature && currentSignature === baselineSignature && !responseMentionsArtifact) {
+    console.log('[Claude] Artifact panel appears unchanged. Skipping artifact extraction.');
+    return null;
+  }
+
+  const copyResult = await tryCopyArtifactText(page, options);
+  if (copyResult) {
+    console.log('[Claude] Extracted Claude artifact via Copy. Length:', copyResult.text.length);
+    return copyResult;
+  }
+
+  const downloadResult = await tryDownloadArtifactText(page, options);
+  if (downloadResult) {
+    console.log(
+      '[Claude] Extracted Claude artifact via Download as .txt. Length:',
+      downloadResult.text.length
+    );
+    return downloadResult;
+  }
+
+  return null;
+}
+
 async function findContinueGeneratingButton(page) {
   return findFirstVisibleLocator([
-    page.getByRole('button', { name: /Continue generating/i }),
-    page.locator('button[aria-label*="Continue generating"]'),
-    page.getByText(/Continue generating/i),
+    page.getByRole('button', { name: /Continue(?: generating| response)?/i }),
+    page.locator('button[aria-label*="Continue" i], button[title*="Continue" i]'),
+    page.locator('button, [role="button"]').filter({ hasText: /^Continue(?: generating| response)?$/i }),
+    page.getByText(/Continue generating|Continue response/i),
   ]);
 }
 
 async function extractLatestResponseText(page) {
-  return page.evaluate(() => {
-    const selectors = [
-      'main [data-testid*="assistant"]',
-      'main [data-testid*="message"]',
-      'main article',
-      'main [class*="prose"]',
-      'main [class*="markdown"]',
-    ];
-    const seen = new Set();
-    const texts = [];
+  const snapshot = await getLatestResponseSnapshot(page);
+  return snapshot.text;
+}
 
-    const isVisible = (element) => {
+async function getLatestResponseSnapshot(page) {
+  return page.evaluate(() => {
+    const main = document.querySelector('main') || document.body;
+
+    const normalizeText = (value) =>
+      (value || '')
+        .replace(/\r/g, '')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/\b(?:Retry|Try again|Continue generating|Stop generating)\b/g, '')
+        .replace(/\b(?:Reply\.\.\.|Claude is AI and can make mistakes\. Please double-check responses\.)\b/g, '')
+        .replace(/\bWant to be notified when Claude responds\?/gi, '')
+        .replace(/^\s*(?:Share|Copy|Like|Dislike|Notify|Dismiss|Write a message\.\.\.)\s*$/gim, '')
+        .replace(/^\s*(?:Sonnet|Opus|Haiku)\s+\d(?:\.\d)?(?:\s+Adaptive)?\s*$/gim, '')
+        .replace(/^\s*(?:Adaptive thinking|Adaptive|More models|Most efficient for everyday tasks|Thinks for more complex tasks)\s*$/gim, '')
+        .trim();
+
+    const isVisibleBox = (rect) =>
+      rect && rect.width > 0 && rect.height > 0;
+
+    const isElementVisible = (element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
 
       return (
-        rect.width > 0 &&
-        rect.height > 0 &&
+        isVisibleBox(rect) &&
         style.display !== 'none' &&
         style.visibility !== 'hidden'
       );
     };
 
-    for (const selector of selectors) {
-      for (const element of document.querySelectorAll(selector)) {
-        if (!isVisible(element)) {
-          continue;
+    const getComposerTop = () => {
+      const composers = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+        .filter((element) => isElementVisible(element));
+      const composer = composers[composers.length - 1];
+
+      if (!composer) {
+        return Number.POSITIVE_INFINITY;
+      }
+
+      return composer.getBoundingClientRect().top;
+    };
+
+    const shouldSkipElement = (element) => {
+      if (!element) {
+        return true;
+      }
+
+      if (element.closest('[contenteditable="true"]')) {
+        return true;
+      }
+
+      if (
+        element.closest('button, [role="button"], input, textarea, select, nav, aside, header, footer, script, style, noscript')
+      ) {
+        return true;
+      }
+
+      if (
+        element.closest('[data-testid*="toast" i], [data-testid*="notification" i], [class*="toast" i], [class*="notification" i]')
+      ) {
+        return true;
+      }
+
+      const elementText = element.innerText || element.textContent || '';
+      if (
+        elementText.length < 500 &&
+        /Want to be notified when Claude responds|Claude is AI and can make mistakes|Write a message/i.test(elementText)
+      ) {
+        return true;
+      }
+
+      return false;
+    };
+
+    const composerTop = getComposerTop();
+    const blockCandidates = [];
+    const texts = [];
+    const seenText = new Set();
+    let candidateCount = 0;
+
+    const addText = (text) => {
+      const normalized = normalizeText(text);
+
+      if (!normalized || normalized.length < 2 || seenText.has(normalized)) {
+        return;
+      }
+
+      if (
+        normalized.length > 40 &&
+        texts.some((existing) => existing.includes(normalized))
+      ) {
+        return;
+      }
+
+      for (let index = texts.length - 1; index >= 0; index -= 1) {
+        const existing = texts[index];
+
+        if (
+          existing.length > 40 &&
+          normalized.length > existing.length &&
+          normalized.includes(existing)
+        ) {
+          texts.splice(index, 1);
+          seenText.delete(existing);
         }
+      }
 
-        const text = (element.innerText || '')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
+      seenText.add(normalized);
+      texts.push(normalized);
+    };
 
-        if (!text || text.length < 20 || seen.has(text)) {
-          continue;
-        }
+    const countMarker = (text, pattern) =>
+      (text.match(pattern) || []).length;
 
-        seen.add(text);
-        texts.push(text);
+    const getElementDepth = (element) => {
+      let depth = 0;
+      let current = element;
+
+      while (current && current !== document.body) {
+        depth += 1;
+        current = current.parentElement;
+      }
+
+      return depth;
+    };
+
+    const getSourcePriority = (sourceName, element) => {
+      const rawMeta = [
+        element.getAttribute('data-message-author-role'),
+        element.getAttribute('data-testid'),
+        element.getAttribute('aria-label'),
+        element.className,
+      ].join(' ').toLowerCase();
+
+      if (rawMeta.includes('assistant') || rawMeta.includes('claude')) {
+        return 7000;
+      }
+
+      if (rawMeta.includes('message')) {
+        return 4500;
+      }
+
+      if (/article|prose|markdown|font-claude-message/.test(sourceName)) {
+        return 3500;
+      }
+
+      if (/pre|blockquote|table/.test(sourceName)) {
+        return 2000;
+      }
+
+      if (/generic/.test(sourceName)) {
+        return 500;
+      }
+
+      return 1000;
+    };
+
+    const addBlockCandidate = (element, sourceName) => {
+      if (shouldSkipElement(element) || !isElementVisible(element)) {
+        return;
+      }
+
+      const rect = element.getBoundingClientRect();
+      if (rect.top >= composerTop - 4 || rect.bottom <= 0) {
+        return;
+      }
+
+      const text = normalizeText(element.innerText || element.textContent || '');
+
+      if (!text || text.length < 100) {
+        return;
+      }
+
+      if (
+        text.length < 500 &&
+        /want to be notified when claude responds|write a message|claude is ai and can make mistakes/i.test(text)
+      ) {
+        return;
+      }
+
+      const distanceToComposer = Number.isFinite(composerTop)
+        ? Math.max(0, composerTop - rect.bottom)
+        : Math.max(0, window.innerHeight - rect.bottom);
+      const messageTurnCount =
+        countMarker(text, /\bYou said:/gi) +
+        countMarker(text, /\bClaude responded:/gi);
+
+      let score = 0;
+      score += Math.max(0, 5000 - distanceToComposer) * 4;
+      score += Math.min(text.length, 16000) / 4;
+      score += getSourcePriority(sourceName, element);
+      score += Math.min(getElementDepth(element), 40) * 15;
+
+      if (messageTurnCount > 2) {
+        score -= messageTurnCount * 1500;
+      }
+
+      if (text.length > 50000) {
+        score -= 6000;
+      } else if (text.length > 30000) {
+        score -= 2500;
+      }
+
+      blockCandidates.push({
+        element,
+        text,
+        sourceName,
+        score,
+        rectBottom: rect.bottom,
+        textLength: text.length,
+      });
+    };
+
+    const semanticBlockSelector = [
+      '[data-message-author-role]',
+      '[data-testid*="message" i]',
+      '[data-testid*="assistant" i]',
+      '[data-testid*="conversation" i]',
+      '[class*="font-claude-message"]',
+      '[class*="prose"]',
+      '[class*="markdown"]',
+      '[class*="message" i]',
+      'article',
+      'pre',
+      'blockquote',
+      'table',
+    ].join(', ');
+
+    for (const element of main.querySelectorAll(semanticBlockSelector)) {
+      addBlockCandidate(element, 'semantic');
+    }
+
+    if (!blockCandidates.some((candidate) => candidate.textLength >= 500)) {
+      for (const element of main.querySelectorAll('section, div')) {
+        addBlockCandidate(element, 'generic');
       }
     }
 
-    return texts[texts.length - 1] || '';
+    for (const candidate of blockCandidates) {
+      const nestedEquivalent = blockCandidates.some((other) =>
+        other !== candidate &&
+        candidate.element.contains(other.element) &&
+        Math.abs(other.rectBottom - candidate.rectBottom) <= 32 &&
+        other.textLength >= candidate.textLength * 0.55 &&
+        other.textLength < candidate.textLength * 0.98
+      );
+
+      if (nestedEquivalent) {
+        candidate.score -= 2500;
+      }
+    }
+
+    const bestBlockCandidate = blockCandidates
+      .sort((left, right) => right.score - left.score)[0];
+
+    if (bestBlockCandidate && bestBlockCandidate.text.length >= 100) {
+      const text = bestBlockCandidate.text;
+      const source = `latest-${bestBlockCandidate.sourceName}`;
+      const signature = `${source}:${text.length}:${text.slice(0, 160)}:${text.slice(-300)}`;
+
+      return {
+        text,
+        signature,
+        count: blockCandidates.length,
+        sourceWeight: bestBlockCandidate.score,
+        source,
+        candidateCount: blockCandidates.length,
+      };
+    }
+
+    const blockSelector = [
+      'main [data-message-author-role]',
+      'main [data-testid*="message"]',
+      'main [data-testid*="assistant"]',
+      'main [class*="font-claude-message"]',
+      'main [class*="prose"]',
+      'main [class*="markdown"]',
+      'main article',
+      'main pre',
+      'main blockquote',
+      'main p',
+      'main li',
+      'main h2',
+      'main h3',
+      'main h4',
+    ].join(', ');
+
+    for (const element of main.querySelectorAll(blockSelector)) {
+      if (shouldSkipElement(element) || !isElementVisible(element)) {
+        continue;
+      }
+
+      const rect = element.getBoundingClientRect();
+      if (rect.top >= composerTop - 4) {
+        continue;
+      }
+
+      candidateCount += 1;
+      addText(element.innerText);
+    }
+
+    let source = 'blocks';
+    let text = normalizeText(texts.join('\n\n'));
+
+    const collectVisibleTextNodes = (root, minLeft = 0) => {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const fallbackTexts = [];
+      const fallbackSeen = new Set();
+
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const parent = node.parentElement;
+
+        if (shouldSkipElement(parent)) {
+          continue;
+        }
+
+        const rawText = node.nodeValue || '';
+        const normalized = normalizeText(rawText);
+
+        if (!normalized || fallbackSeen.has(normalized)) {
+          continue;
+        }
+
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const rects = Array.from(range.getClientRects());
+        const isReadablePageText = rects.some((rect) =>
+          isVisibleBox(rect) &&
+          rect.top < composerTop - 4 &&
+          rect.left >= minLeft
+        );
+
+        if (!isReadablePageText) {
+          continue;
+        }
+
+        fallbackSeen.add(normalized);
+        fallbackTexts.push(normalized);
+      }
+
+      return {
+        text: normalizeText(fallbackTexts.join(' ')),
+        count: fallbackTexts.length,
+      };
+    };
+
+    if (text.length < 100) {
+      const fallback = collectVisibleTextNodes(main);
+
+      if (fallback.text.length > text.length) {
+        source = 'text-nodes';
+        text = fallback.text;
+        candidateCount = fallback.count;
+      }
+    }
+
+    if (text.length < 100 && main !== document.body) {
+      const bodyFallback = collectVisibleTextNodes(document.body, 60);
+
+      if (bodyFallback.text.length > text.length) {
+        source = 'body-text-nodes';
+        text = bodyFallback.text;
+        candidateCount = bodyFallback.count;
+      }
+    }
+
+    if (text.length < 100) {
+      const rawMainText = normalizeText(main.innerText);
+
+      if (rawMainText.length > text.length) {
+        source = 'main';
+        text = rawMainText;
+        candidateCount = rawMainText ? 1 : 0;
+      }
+    }
+
+    if (text.length < 100 && main !== document.body) {
+      const rawBodyText = normalizeText(document.body.innerText);
+
+      if (rawBodyText.length > text.length) {
+        source = 'body';
+        text = rawBodyText;
+        candidateCount = rawBodyText ? 1 : 0;
+      }
+    }
+
+    const signature = text
+      ? `${source}:${text.length}:${text.slice(0, 160)}:${text.slice(-300)}`
+      : `0:0`;
+
+    return {
+      text,
+      signature,
+      count: candidateCount,
+      sourceWeight: 0,
+      source,
+      candidateCount,
+    };
   });
 }
 
-async function waitForResponse(page) {
-  console.log('[Claude] Waiting for response (baseline mode)...');
-  var maxWait = 15 * 60 * 1000;
-  var interval = 3000;
-  var elapsed = 0;
-  var lastNewText = '';
-  var stableCount = 0;
-  var retryCount = 0;
+function createResponseTooShortError({ stepNumber, minResponseChars, actualLength }) {
+  const stepLabel = stepNumber ? ` for step ${stepNumber}` : '';
+  const error = new Error(
+    `Claude response too short${stepLabel}: ${actualLength} chars captured, expected at least ${minResponseChars}. Claude may have created an artifact or only returned a summary.`
+  );
+  error.code = 'CLAUDE_RESPONSE_TOO_SHORT';
+  error.actualLength = actualLength;
+  error.minResponseChars = minResponseChars;
+  error.stepNumber = stepNumber;
+  return error;
+}
 
-  // Lay baseline: toan bo text tren page truoc khi response xuat hien.
-  var baselineLength = await page.evaluate(function() {
-    return (document.body.innerText || '').length;
-  });
-  console.log('[Claude] Baseline text length: ' + baselineLength);
+async function waitForResponse(page, responseBaseline = null, options = {}) {
+  console.log('[Claude] Waiting for response (message-scoped mode)...');
 
-  await new Promise(function(r) { setTimeout(r, 5000); });
+  const maxWait = RESPONSE_TIMEOUT_MS;
+  const interval = 3000;
+  const minResponseChars = Math.max(
+    MIN_FINAL_RESPONSE_CHARS,
+    Number(options.minResponseChars || DEFAULT_MIN_RESPONSE_CHARS)
+  );
+  const stepNumber = options.stepNumber;
+  const minStableResponseChars = Number(stepNumber || 0) >= 7 ? 20 : MIN_FINAL_RESPONSE_CHARS;
+  let elapsed = 0;
+  let lastNewText = '';
+  let stableCount = 0;
+  let retryCount = 0;
+  let stopComposerReadyLogged = false;
+  const baseline = responseBaseline || await getLatestResponseSnapshot(page);
+  console.log('[Claude] Baseline response length:', baseline.text.length);
+
+  const normalizeComparableText = (value) =>
+    String(value || '')
+      .replace(/\r/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+  const isSubmittedPromptText = (candidateText) => {
+    const submittedText = baseline.submittedText || '';
+
+    if (!submittedText || !candidateText) {
+      return false;
+    }
+
+    const candidateComparable = normalizeComparableText(candidateText);
+    const submittedComparable = normalizeComparableText(submittedText);
+
+    if (!candidateComparable || !submittedComparable) {
+      return false;
+    }
+
+    if (candidateComparable === submittedComparable) {
+      return true;
+    }
+
+    if (
+      candidateComparable.length >= 120 &&
+      submittedComparable.includes(candidateComparable)
+    ) {
+      return true;
+    }
+
+    if (
+      submittedComparable.length >= 120 &&
+      candidateComparable.includes(submittedComparable)
+    ) {
+      return true;
+    }
+
+    const head = candidateComparable.slice(0, 180);
+    const tail = candidateComparable.slice(-180);
+
+    if (
+      candidateComparable.length > 240 &&
+      submittedComparable.includes(head) &&
+      submittedComparable.includes(tail)
+    ) {
+      return true;
+    }
+
+    const sampleStarts = [
+      0,
+      Math.max(0, Math.floor(candidateComparable.length * 0.25) - 60),
+      Math.max(0, Math.floor(candidateComparable.length * 0.5) - 60),
+      Math.max(0, Math.floor(candidateComparable.length * 0.75) - 60),
+      Math.max(0, candidateComparable.length - 120),
+    ];
+    const samples = Array.from(new Set(sampleStarts))
+      .map((start) => candidateComparable.slice(start, start + 120).trim())
+      .filter((sample) => sample.length >= 80);
+    const matchedSamples = samples.filter((sample) =>
+      submittedComparable.includes(sample)
+    ).length;
+
+    return (
+      samples.length >= 3 &&
+      matchedSamples / samples.length >= 0.75
+    );
+  };
+
+  const stripKnownText = (candidateText, knownText, options = {}) => {
+    if (!candidateText || !knownText || knownText.length < 80) {
+      return candidateText || '';
+    }
+
+    if (candidateText === knownText) {
+      return '';
+    }
+
+    const prefixOnly = Boolean(options.prefixOnly);
+
+    const directIndex = candidateText.lastIndexOf(knownText);
+    if (directIndex >= 0 && (!prefixOnly || directIndex <= 500)) {
+      return candidateText.slice(directIndex + knownText.length).trim();
+    }
+
+    const knownTail = knownText.slice(-500).trim();
+    if (knownTail.length >= 80) {
+      const tailIndex = candidateText.lastIndexOf(knownTail);
+      if (tailIndex >= 0 && (!prefixOnly || tailIndex <= 500)) {
+        return candidateText.slice(tailIndex + knownTail.length).trim();
+      }
+    }
+
+    const knownHead = knownText.slice(0, 500).trim();
+    if (knownHead.length >= 80) {
+      const headIndex = candidateText.indexOf(knownHead);
+      if (headIndex >= 0 && candidateText.length > knownText.length) {
+        return candidateText.slice(headIndex + knownText.length).trim();
+      }
+    }
+
+    return candidateText;
+  };
+
+  const isOnlySubmittedPromptText = (candidateText) => {
+    const submittedText = baseline.submittedText || '';
+
+    if (!submittedText || !candidateText) {
+      return false;
+    }
+
+    const candidateComparable = normalizeComparableText(candidateText);
+    const submittedComparable = normalizeComparableText(submittedText);
+
+    if (!candidateComparable || !submittedComparable) {
+      return false;
+    }
+
+    return (
+      candidateComparable === submittedComparable ||
+      (
+        candidateComparable.length >= 120 &&
+        candidateComparable.length <= submittedComparable.length * 1.1 &&
+        submittedComparable.includes(candidateComparable)
+      )
+    );
+  };
+
+  const isUiNoiseResponse = (candidateText) => {
+    const comparable = normalizeComparableText(candidateText);
+
+    if (!comparable || comparable.length > 400) {
+      return false;
+    }
+
+    return /want to be notified when claude responds|write a message|claude is ai and can make mistakes|sonnet \d|opus \d|haiku \d|adaptive thinking|more models|most efficient for everyday tasks/.test(comparable);
+  };
+
+  const getResponseTextFromSnapshot = (snapshot) => {
+    const originalText = (snapshot?.text || '').trim();
+    let candidateText = originalText;
+
+    candidateText = stripKnownText(candidateText, baseline.submittedText);
+    candidateText = stripKnownText(candidateText, baseline.text, { prefixOnly: true });
+    candidateText = stripKnownText(candidateText, baseline.submittedText);
+
+    if (isSubmittedPromptText(candidateText) || isUiNoiseResponse(candidateText)) {
+      return '';
+    }
+
+    candidateText = candidateText.trim();
+
+    if (
+      candidateText.length < minResponseChars &&
+      originalText.length >= minResponseChars &&
+      !isOnlySubmittedPromptText(originalText) &&
+      !isUiNoiseResponse(originalText)
+    ) {
+      return originalText;
+    }
+
+    return candidateText;
+  };
+
+  await sleep(5000);
 
   while (elapsed < maxWait) {
     try {
-      var retryBtn = await page.$('button:has-text("Retry"), button:has-text("Try again")');
-      if (retryBtn && retryCount < 2) {
-        console.log('[Claude] Clicking retry...');
-        await retryBtn.click();
-        retryCount++;
-        await new Promise(function(r) { setTimeout(r, 5000); });
-        stableCount = 0;
-        lastNewText = '';
-        elapsed += 5000;
-        continue;
-      }
+      const controlState = await getGenerationControlState(page);
 
-      var stopBtn = await page.$('button[aria-label="Stop Response"], button:has-text("Stop")');
-      if (stopBtn) {
+      if (controlState.stopVisible) {
+        const activeSnapshot = await getLatestResponseSnapshot(page);
+        const activeResponseText = getResponseTextFromSnapshot(activeSnapshot);
+        if (
+          activeSnapshot.signature !== baseline.signature &&
+          activeResponseText.length >= MIN_PARTIAL_RESPONSE_CHARS
+        ) {
+          lastNewText = activeResponseText;
+        }
+
+        if (!stopComposerReadyLogged) {
+          console.log('[Claude] Stop control is visible. Claude is still generating.');
+          stopComposerReadyLogged = true;
+        }
+
         stableCount = 0;
         elapsed += interval;
-        await new Promise(function(r) { setTimeout(r, interval); });
+        await sleep(interval);
         continue;
       }
 
-      var continueBtn = await page.$('button:has-text("Continue")');
-      if (continueBtn) {
-        console.log('[Claude] Clicking Continue...');
-        await continueBtn.click();
-        await new Promise(function(r) { setTimeout(r, 3000); });
+      if (!controlState.composerReady) {
+        stableCount = 0;
+        elapsed += interval;
+        await sleep(interval);
+        continue;
+      }
+
+      const continueButton = await findContinueGeneratingButton(page);
+      if (continueButton) {
+        console.log('[Claude] Clicking Continue generating...');
+        await clickIfVisible(continueButton);
+        await sleep(3000);
         stableCount = 0;
         elapsed += 3000;
         continue;
       }
 
-      // Lay text moi: phan text dai hon baseline.
-      var currentNewText = await page.evaluate(function(bl) {
-        var bodyText = document.body.innerText || '';
-        if (bodyText.length > bl + 100) {
-          return bodyText.substring(bl);
-        }
-        return '';
-      }, baselineLength);
+      const currentSnapshot = await getLatestResponseSnapshot(page);
+      const currentNewText =
+        currentSnapshot.signature !== baseline.signature
+          ? getResponseTextFromSnapshot(currentSnapshot)
+          : '';
 
-      if (currentNewText.length > 100 && currentNewText === lastNewText) {
-        stableCount++;
+      if (
+        currentNewText.length >= MIN_PARTIAL_RESPONSE_CHARS &&
+        currentNewText === lastNewText
+      ) {
+        stableCount += 1;
       } else {
         stableCount = 0;
-        if (currentNewText.length > 0) lastNewText = currentNewText;
+        if (currentNewText.length > 0) {
+          lastNewText = currentNewText;
+        }
       }
 
-      // Text moi on dinh 3 lan (9 giay) = response xong.
-      if (stableCount >= 3 && lastNewText.length > 100) {
-        console.log('[Claude] Response done. New text length: ' + lastNewText.length);
+      const hasEnoughFinalText = lastNewText.length >= minResponseChars;
+      const hasStableButTooShortText =
+        lastNewText.length >= minStableResponseChars &&
+        lastNewText.length < minResponseChars &&
+        elapsed >= SHORT_RESPONSE_ACCEPT_MS;
+
+      if (stableCount >= 3 && hasEnoughFinalText) {
+        console.log('[Claude] Response complete. New text length:', lastNewText.length);
         return lastNewText;
       }
 
-    } catch (e) {
-      console.log('[Claude] Poll error (ignoring)');
+      if (stableCount >= 3 && hasStableButTooShortText) {
+        console.warn(
+          '[Claude] Stable response is shorter than the preferred minimum. Continuing anyway. Length:',
+          lastNewText.length,
+          'preferred minimum:',
+          minResponseChars
+        );
+        return lastNewText;
+      }
+
+      const shouldTryRetry =
+        retryCount < MAX_RESPONSE_RETRIES &&
+        elapsed >= 45000 &&
+        lastNewText.length < MIN_PARTIAL_RESPONSE_CHARS;
+
+      if (shouldTryRetry) {
+        const retryButton = await findRetryButton(page);
+
+        if (retryButton) {
+          console.log('[Claude] Clicking retry... attempt', retryCount + 1);
+          await clickIfVisible(retryButton);
+          retryCount += 1;
+          await sleep(5000);
+          stableCount = 0;
+          lastNewText = '';
+          elapsed += 5000;
+          continue;
+        }
+      }
+    } catch (error) {
+      if (error?.code === 'CLAUDE_RESPONSE_TOO_SHORT') {
+        throw error;
+      }
+
+      console.log('[Claude] Poll check error (ignoring)');
     }
 
     elapsed += interval;
-    await new Promise(function(r) { setTimeout(r, interval); });
+    await sleep(interval);
 
     if (elapsed % 30000 === 0) {
-      console.log('[Claude] Still waiting... ' + Math.round(elapsed/1000) + 's, new text: ' + lastNewText.length + ' chars');
+      const debugSnapshot = await getLatestResponseSnapshot(page);
+      const debugControlState = await getGenerationControlState(page);
+      console.log(
+        '[Claude] Still waiting...',
+        Math.round(elapsed / 1000) + 's, new text:',
+        lastNewText.length,
+        'chars, snapshot:',
+        debugSnapshot.text.length,
+        'chars via',
+        debugSnapshot.source,
+        'candidates:',
+        debugSnapshot.candidateCount,
+        'composerReady:',
+        debugControlState.composerReady,
+        'stopVisible:',
+        debugControlState.stopVisible,
+        'sendVisible:',
+        debugControlState.sendVisible,
+        'sendEnabled:',
+        debugControlState.sendEnabled
+      );
     }
   }
 
-  if (lastNewText.length > 100) {
-    console.log('[Claude] Timeout but has new text. Length: ' + lastNewText.length);
+  if (lastNewText.length >= minResponseChars) {
+    console.log('[Claude] Timeout but has new text. Length:', lastNewText.length);
     return lastNewText;
   }
-  throw new Error('Response timeout after 15 minutes');
+
+  if (lastNewText.length > 0) {
+    console.warn(
+      '[Claude] Timeout captured text was shorter than preferred minimum. Continuing anyway. Length:',
+      lastNewText.length,
+      'preferred minimum:',
+      minResponseChars
+    );
+    return lastNewText;
+  }
+
+  throw new Error(
+    `Timed out waiting for Claude response. Last captured text was too short (${lastNewText.length} chars, minimum ${minResponseChars}).`
+  );
 }
 
 async function handleContextLimit(page, socket) {
@@ -715,5 +2276,6 @@ module.exports = {
   renameChat,
   sendMessage,
   waitForResponse,
+  extractClaudeArtifactText,
   handleContextLimit,
 };

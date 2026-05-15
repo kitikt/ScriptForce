@@ -1,10 +1,8 @@
 .panel {
   width: 250px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: rgba(26, 26, 46, 0.92);
   padding: 1.25rem;
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24);
 }
