@@ -90,6 +90,93 @@ async function findVisibleChatInput(page) {
   return null;
 }
 
+async function hasTransientClaudeOverlay(page) {
+  try {
+    return await page.evaluate(() => {
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.pointerEvents !== 'none'
+        );
+      };
+
+      return Array.from(document.querySelectorAll('[data-base-ui-portal], [data-radix-portal]'))
+        .some((portal) => isVisible(portal));
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function closeTransientClaudeUi(page) {
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (!await hasTransientClaudeOverlay(page)) {
+        return false;
+      }
+
+      await page.keyboard.press('Escape');
+      await sleep(300);
+    }
+
+    const disabledBlockers = await page.evaluate(() => {
+      let count = 0;
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.pointerEvents !== 'none'
+        );
+      };
+
+      for (const blocker of document.querySelectorAll('[data-base-ui-portal] [data-base-ui-inert][role="presentation"]')) {
+        if (!isVisible(blocker)) {
+          continue;
+        }
+
+        blocker.style.pointerEvents = 'none';
+        count += 1;
+      }
+
+      return count;
+    });
+
+    if (disabledBlockers > 0) {
+      console.warn('[Claude] Disabled stale Claude overlay blockers:', disabledBlockers);
+      return true;
+    }
+  } catch (error) {
+    console.warn('[Claude] Failed to close transient Claude UI:', error.message);
+  }
+
+  return false;
+}
+
+async function focusChatInput(page, input) {
+  await closeTransientClaudeUi(page);
+
+  try {
+    await input.click({ timeout: 6000 });
+    return;
+  } catch (error) {
+    console.warn('[Claude] Chat input click failed, clearing overlays and retrying:', error.message);
+  }
+
+  await closeTransientClaudeUi(page);
+  await input.click({ timeout: 6000, force: true });
+}
+
 function normalizeTextForMatch(value) {
   return String(value || '')
     .replace(/\r/g, '')
@@ -138,7 +225,7 @@ async function setComposerText(page, text) {
     throw new Error('Chat input not found while setting prompt text.');
   }
 
-  await input.click();
+  await focusChatInput(page, input);
   await input.evaluate((element, value) => {
     element.focus();
 
@@ -1262,15 +1349,18 @@ async function renameChat(page, chatName) {
     }
 
     if (apiAccepted) {
-      console.warn('[Claude] Trying UI fallback because Claude.ai did not refresh the visible title yet.');
-    } else {
-      console.warn(
-        '[Claude] Rename API failed:',
-        result.error || JSON.stringify(result.attempts?.slice(-2))
-      );
+      console.warn('[Claude] Rename API accepted but visible title was not refreshed. Continuing without UI fallback.');
+      await closeTransientClaudeUi(page);
+      return true;
     }
 
+    console.warn(
+      '[Claude] Rename API failed:',
+      result.error || JSON.stringify(result.attempts?.slice(-2))
+    );
+
     const uiRenamed = await renameChatViaUi(page, chatName);
+    await closeTransientClaudeUi(page);
 
     if (uiRenamed) {
       console.log('[Claude] Chat renamed successfully via UI fallback.');
@@ -1279,6 +1369,7 @@ async function renameChat(page, chatName) {
     return uiRenamed;
   } catch (error) {
     console.warn('[Claude] renameChat failed:', error.message);
+    await closeTransientClaudeUi(page);
     return false;
   }
 }
@@ -1297,7 +1388,7 @@ async function sendMessage(page, text) {
     }
 
     console.log('[Claude] Focusing chat input...');
-    await input.click();
+    await focusChatInput(page, input);
     await randomDelay();
 
     console.log('[Claude] Clearing previous input...');
