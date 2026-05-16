@@ -718,12 +718,14 @@ async function navigateToProject(page, projectUrl) {
     console.log('[Claude] Navigating to project:', fullUrl);
     await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await new Promise((r) => setTimeout(r, 3000));
+    await createNewChat(page);
     
     // Verify đã vào đúng project
     const currentUrl = page.url();
     console.log('[Claude] Current URL after navigate:', currentUrl);
+    const composerState = await getComposerState(page);
     
-    if (currentUrl.includes('/project/')) {
+    if (currentUrl.includes('/project/') || composerState.available) {
       console.log('[Claude] Successfully navigated to project');
       return true;
     } else {
@@ -734,6 +736,66 @@ async function navigateToProject(page, projectUrl) {
     console.error('[Claude] navigateToProject failed:', e);
     return false;
   }
+}
+
+async function hasVisibleConversationHistory(page) {
+  try {
+    return await page.evaluate(() => {
+      const isVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden'
+        );
+      };
+
+      const composers = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+        .filter((element) => isVisible(element));
+      const composer = composers[composers.length - 1];
+      const composerTop = composer
+        ? composer.getBoundingClientRect().top
+        : Number.POSITIVE_INFINITY;
+      const messageNodes = Array.from(document.querySelectorAll(
+        'main [data-message-author-role], main [data-testid*="message" i], main [data-testid*="assistant" i], main [data-testid*="user" i]'
+      ));
+
+      return messageNodes.some((element) => {
+        if (!isVisible(element)) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const text = (element.innerText || element.textContent || '').trim();
+
+        return (
+          rect.top < composerTop - 4 &&
+          text.length >= 80 &&
+          !/write a message|claude is ai and can make mistakes|want to be notified when claude responds/i.test(text)
+        );
+      });
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function findNewChatButton(page) {
+  return findFirstVisibleLocator([
+    page.getByRole('link', { name: /^(?:\+\s*)?(New chat|Start new chat|New conversation)$/i }),
+    page.getByRole('button', { name: /^(?:\+\s*)?(New chat|Start new chat|New conversation)$/i }),
+    page.locator('a, button, [role="button"]').filter({
+      hasText: /^(?:\+\s*)?(New chat|Start new chat|New conversation)$/i,
+    }),
+    page.locator('a[href*="/new"], a[href*="/chat/new"], button[aria-label*="New chat" i], button[title*="New chat" i]'),
+  ]);
 }
 
 async function findModelSelectorButton(page) {
@@ -929,6 +991,18 @@ async function selectModel(page, modelName, options = {}) {
 async function createNewChat(page) {
   try {
     console.log('[Claude] Checking if chat input is ready...');
+
+    if (await hasVisibleConversationHistory(page)) {
+      console.log('[Claude] Existing conversation content detected. Opening a fresh chat...');
+      const newChatButton = await findNewChatButton(page);
+
+      if (newChatButton) {
+        await clickIfVisible(newChatButton);
+        await sleep(2500);
+      } else {
+        console.warn('[Claude] New chat button not found; continuing with current project surface.');
+      }
+    }
     
     // Khi đã navigate vào project page, chat input đã sẵn sàng
     // Không cần click nút gì thêm
@@ -2383,6 +2457,276 @@ async function getResponseSnapshotAfterSubmittedPrompt(page, submittedText) {
   }
 }
 
+async function getResponseSnapshotAfterBaseline(page, baselineText, submittedText) {
+  if (!baselineText || String(baselineText).trim().length < 80) {
+    return null;
+  }
+
+  try {
+    return await page.evaluate(({ rawBaselineText, rawSubmittedText }) => {
+      const normalizeText = (value) =>
+        (value || '')
+          .replace(/\r/g, '')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n[ \t]+/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .replace(/\b(?:Retry|Try again|Continue generating|Stop generating)\b/g, '')
+          .replace(/\b(?:Reply\.\.\.|Claude is AI and can make mistakes\. Please double-check responses\.)\b/g, '')
+          .replace(/\bWant to be notified when Claude responds\?/gi, '')
+          .replace(/^\s*(?:Share|Copy|Like|Dislike|Notify|Dismiss|Write a message\.\.\.)\s*$/gim, '')
+          .replace(/^\s*(?:Sonnet|Opus|Haiku)\s+\d(?:\.\d)?(?:\s+Adaptive)?\s*$/gim, '')
+          .replace(/^\s*(?:Adaptive thinking|Adaptive|More models|Most efficient for everyday tasks|Thinks for more complex tasks)\s*$/gim, '')
+          .trim();
+
+      const normalizeComparableText = (value) =>
+        normalizeText(value)
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+
+      const isVisibleBox = (rect) =>
+        rect && rect.width > 0 && rect.height > 0;
+
+      const isElementVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          isVisibleBox(rect) &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden'
+        );
+      };
+
+      const getComposerTop = () => {
+        const composers = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+          .filter((element) => isElementVisible(element));
+        const composer = composers[composers.length - 1];
+
+        if (!composer) {
+          return Number.POSITIVE_INFINITY;
+        }
+
+        return composer.getBoundingClientRect().top;
+      };
+
+      const shouldSkipElement = (element) => {
+        if (!element) {
+          return true;
+        }
+
+        if (element.closest('[contenteditable="true"]')) {
+          return true;
+        }
+
+        if (
+          element.closest('button, [role="button"], input, textarea, select, nav, aside, header, footer, script, style, noscript')
+        ) {
+          return true;
+        }
+
+        if (
+          element.closest('[data-testid*="toast" i], [data-testid*="notification" i], [class*="toast" i], [class*="notification" i]')
+        ) {
+          return true;
+        }
+
+        const elementText = element.innerText || element.textContent || '';
+        if (
+          elementText.length < 500 &&
+          /Want to be notified when Claude responds|Claude is AI and can make mistakes|Write a message/i.test(elementText)
+        ) {
+          return true;
+        }
+
+        return false;
+      };
+
+      const baseline = normalizeText(rawBaselineText);
+      const baselineComparable = normalizeComparableText(rawBaselineText);
+      const submittedComparable = normalizeComparableText(rawSubmittedText);
+
+      if (!baseline || baselineComparable.length < 80) {
+        return null;
+      }
+
+      const baselineHead = baselineComparable.slice(0, 220);
+      const baselineTail = baselineComparable.slice(-320);
+
+      const isBaselineText = (text) => {
+        const comparable = normalizeComparableText(text);
+
+        if (!comparable) {
+          return false;
+        }
+
+        if (comparable === baselineComparable) {
+          return true;
+        }
+
+        if (
+          comparable.length >= baselineComparable.length * 0.9 &&
+          comparable.includes(baselineHead) &&
+          comparable.includes(baselineTail)
+        ) {
+          return true;
+        }
+
+        return (
+          baselineComparable.length >= 500 &&
+          comparable.length >= 500 &&
+          baselineComparable.includes(comparable.slice(0, 240)) &&
+          baselineComparable.includes(comparable.slice(-240))
+        );
+      };
+
+      const isSubmittedPromptText = (text) => {
+        if (!submittedComparable) {
+          return false;
+        }
+
+        const comparable = normalizeComparableText(text);
+
+        if (!comparable) {
+          return false;
+        }
+
+        return (
+          comparable === submittedComparable ||
+          (
+            comparable.length >= 120 &&
+            comparable.length <= submittedComparable.length * 1.1 &&
+            submittedComparable.includes(comparable)
+          )
+        );
+      };
+
+      const isUiNoise = (text) => {
+        const comparable = normalizeComparableText(text);
+
+        return (
+          comparable.length <= 400 &&
+          /want to be notified when claude responds|write a message|claude is ai and can make mistakes|sonnet \d|opus \d|haiku \d|adaptive thinking|more models|most efficient for everyday tasks/.test(comparable)
+        );
+      };
+
+      const getSourcePriority = (element) => {
+        const rawMeta = [
+          element.getAttribute('data-message-author-role'),
+          element.getAttribute('data-testid'),
+          element.getAttribute('aria-label'),
+          element.className,
+        ].join(' ').toLowerCase();
+
+        if (rawMeta.includes('assistant') || rawMeta.includes('claude')) {
+          return 4;
+        }
+
+        if (rawMeta.includes('message')) {
+          return 3;
+        }
+
+        return 1;
+      };
+
+      const main = document.querySelector('main') || document.body;
+      const composerTop = getComposerTop();
+      const semanticBlockSelector = [
+        '[data-message-author-role]',
+        '[data-testid*="message" i]',
+        '[data-testid*="assistant" i]',
+        '[data-testid*="conversation" i]',
+        '[class*="font-claude-message"]',
+        '[class*="prose"]',
+        '[class*="markdown"]',
+        '[class*="message" i]',
+        'article',
+        'pre',
+        'blockquote',
+        'table',
+      ].join(', ');
+
+      const elements = Array.from(main.querySelectorAll(semanticBlockSelector));
+      let baselineIndex = -1;
+      const candidates = [];
+
+      elements.forEach((element, index) => {
+        if (shouldSkipElement(element) || !isElementVisible(element)) {
+          return;
+        }
+
+        const rect = element.getBoundingClientRect();
+        if (rect.top >= composerTop - 4 || rect.bottom <= 0) {
+          return;
+        }
+
+        const text = normalizeText(element.innerText || element.textContent || '');
+        if (!text || text.length < 100 || isUiNoise(text)) {
+          return;
+        }
+
+        if (isBaselineText(text)) {
+          baselineIndex = Math.max(baselineIndex, index);
+          return;
+        }
+
+        candidates.push({
+          index,
+          text,
+          sourcePriority: getSourcePriority(element),
+          textLength: text.length,
+        });
+      });
+
+      if (baselineIndex < 0) {
+        return null;
+      }
+
+      const afterBaseline = candidates
+        .filter((candidate) =>
+          candidate.index > baselineIndex &&
+          !isSubmittedPromptText(candidate.text) &&
+          !normalizeComparableText(candidate.text).includes(baselineTail)
+        )
+        .sort((left, right) => {
+          if (left.index !== right.index) {
+            return right.index - left.index;
+          }
+
+          if (left.sourcePriority !== right.sourcePriority) {
+            return right.sourcePriority - left.sourcePriority;
+          }
+
+          return right.textLength - left.textLength;
+        });
+
+      const best = afterBaseline[0];
+
+      if (!best) {
+        return null;
+      }
+
+      return {
+        text: best.text,
+        signature: `after-baseline:${baselineIndex}:${best.index}:${best.text.length}:${best.text.slice(0, 80)}:${best.text.slice(-300)}`,
+        count: afterBaseline.length,
+        sourceWeight: best.index,
+        source: 'after-baseline',
+        candidateCount: afterBaseline.length,
+      };
+    }, {
+      rawBaselineText: baselineText,
+      rawSubmittedText: submittedText || '',
+    });
+  } catch {
+    return null;
+  }
+}
+
 function createResponseTooShortError({ stepNumber, minResponseChars, actualLength }) {
   const stepLabel = stepNumber ? ` for step ${stepNumber}` : '';
   const error = new Error(
@@ -2597,6 +2941,22 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
         return {
           snapshot: submittedPromptSnapshot,
           text: submittedPromptText,
+        };
+      }
+    }
+
+    const afterBaselineSnapshot = await getResponseSnapshotAfterBaseline(
+      page,
+      baseline.text,
+      baseline.submittedText
+    );
+
+    if (afterBaselineSnapshot) {
+      const afterBaselineText = getResponseTextFromSnapshot(afterBaselineSnapshot);
+      if (afterBaselineText.length > text.length) {
+        return {
+          snapshot: afterBaselineSnapshot,
+          text: afterBaselineText,
         };
       }
     }
