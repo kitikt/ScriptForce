@@ -90,6 +90,356 @@ async function findVisibleChatInput(page) {
   return null;
 }
 
+function normalizeTextForMatch(value) {
+  return String(value || '')
+    .replace(/\r/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function textLooksLikePrompt(candidateText, promptText) {
+  const candidate = normalizeTextForMatch(candidateText);
+  const prompt = normalizeTextForMatch(promptText);
+
+  if (!candidate || !prompt) {
+    return false;
+  }
+
+  if (candidate === prompt) {
+    return true;
+  }
+
+  const meaningfulLength = Math.min(80, Math.max(12, Math.floor(prompt.length * 0.2)));
+
+  if (candidate.length < meaningfulLength) {
+    return false;
+  }
+
+  if (prompt.includes(candidate) || candidate.includes(prompt)) {
+    return true;
+  }
+
+  const head = prompt.slice(0, 180);
+  const tail = prompt.slice(-180);
+
+  return (
+    head.length >= 80 &&
+    tail.length >= 80 &&
+    candidate.includes(head) &&
+    candidate.includes(tail)
+  );
+}
+
+async function setComposerText(page, text) {
+  const input = await findVisibleChatInput(page);
+
+  if (!input) {
+    throw new Error('Chat input not found while setting prompt text.');
+  }
+
+  await input.click();
+  await input.evaluate((element, value) => {
+    element.focus();
+
+    try {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('insertText', false, value);
+    } catch {
+      element.innerHTML = '';
+      element.textContent = value;
+    }
+
+    element.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      data: value,
+      inputType: 'insertText',
+    }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  }, text);
+}
+
+async function ensureComposerHasPrompt(page, text) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const composerState = await getComposerState(page);
+
+    if (textLooksLikePrompt(composerState.text, text)) {
+      return true;
+    }
+
+    if (attempt === 0) {
+      console.warn(
+        '[Claude] Prompt paste was not reflected in composer, applying DOM insertion fallback.'
+      );
+    }
+
+    await setComposerText(page, text);
+    await sleep(700);
+  }
+
+  const composerState = await getComposerState(page);
+  throw new Error(
+    `Prompt was not loaded into the composer. Composer text length: ${composerState.text.length}.`
+  );
+}
+
+async function findComposerSubmitButtonTarget(page) {
+  try {
+    return await page.evaluate(() => {
+      const isVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.pointerEvents !== 'none'
+        );
+      };
+
+      const isDisabled = (element) =>
+        Boolean(
+          element.disabled ||
+          element.getAttribute('aria-disabled') === 'true' ||
+          element.closest('[aria-disabled="true"], [disabled], [inert]')
+        );
+
+      const composers = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+        .filter((element) => isVisible(element));
+      const composer = composers[composers.length - 1];
+
+      if (!composer) {
+        return { found: false, reason: 'composer-not-found' };
+      }
+
+      const composerRect = composer.getBoundingClientRect();
+      const containers = [];
+      let cursor = composer;
+
+      for (let depth = 0; cursor && depth < 10; depth += 1) {
+        containers.push(cursor);
+        cursor = cursor.parentElement;
+      }
+
+      const buttons = Array.from(new Set(
+        containers.flatMap((container) => Array.from(container.querySelectorAll('button')))
+      ));
+
+      const excludedLabels =
+        /attach|upload|file|image|photo|mic|voice|dictation|model|search|settings|tool|project|menu|more|close|stop|cancel|retry|copy|download|print|publish|thumb|like|dislike/i;
+      const candidates = [];
+
+      for (const button of buttons) {
+        if (!isVisible(button) || isDisabled(button)) {
+          continue;
+        }
+
+        const rect = button.getBoundingClientRect();
+        const rawLabel = [
+          button.innerText,
+          button.textContent,
+          button.getAttribute('aria-label'),
+          button.getAttribute('title'),
+          button.getAttribute('data-testid'),
+          button.className,
+        ].filter(Boolean).join(' ');
+        const label = String(rawLabel || '').trim();
+        const normalizedLabel = label.toLowerCase();
+        const hasSendLabel = /send|submit/i.test(label);
+
+        if (!hasSendLabel && excludedLabels.test(label)) {
+          continue;
+        }
+
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const targetX = composerRect.right - 24;
+        const targetY = composerRect.bottom - 24;
+        const rightSide = centerX >= composerRect.left + composerRect.width * 0.55;
+        const nearComposerBottom =
+          centerY >= composerRect.top - 20 &&
+          centerY <= composerRect.bottom + 70;
+        const squareish =
+          rect.width >= 20 &&
+          rect.height >= 20 &&
+          rect.width <= 70 &&
+          rect.height <= 70 &&
+          Math.abs(rect.width - rect.height) <= 24;
+
+        let score = 0;
+        if (hasSendLabel) score += 100;
+        if (rightSide) score += 35;
+        if (nearComposerBottom) score += 35;
+        if (squareish) score += 15;
+        if (button.querySelector('svg')) score += 8;
+        if (!normalizedLabel) score += 5;
+        score -= (Math.abs(centerX - targetX) + Math.abs(centerY - targetY)) / 20;
+
+        candidates.push({
+          x: centerX,
+          y: centerY,
+          score,
+          label: label.slice(0, 120),
+          width: rect.width,
+          height: rect.height,
+        });
+      }
+
+      candidates.sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+
+      if (!best || best.score < 10) {
+        return {
+          found: false,
+          reason: 'submit-button-not-found',
+          candidateCount: candidates.length,
+          best,
+        };
+      }
+
+      return {
+        found: true,
+        ...best,
+        candidateCount: candidates.length,
+      };
+    });
+  } catch (error) {
+    return {
+      found: false,
+      reason: error.message,
+    };
+  }
+}
+
+async function clickComposerSubmitButton(page) {
+  const sendButton = await findSendButton(page);
+
+  if (sendButton && await isLocatorEnabled(sendButton)) {
+    console.log('[Claude] Clicking send button...');
+    await sendButton.click();
+    return true;
+  }
+
+  const target = await findComposerSubmitButtonTarget(page);
+
+  if (!target.found) {
+    console.log('[Claude] Composer submit button fallback did not find a target:', target.reason);
+    return false;
+  }
+
+  console.log(
+    '[Claude] Clicking composer submit fallback at',
+    Math.round(target.x),
+    Math.round(target.y),
+    'score:',
+    Math.round(target.score),
+    'label:',
+    target.label || '(unlabeled)'
+  );
+  await page.mouse.click(target.x, target.y);
+  return true;
+}
+
+async function waitForPromptSubmitted(page, promptText, timeoutMs = 12000) {
+  const interval = 800;
+  let elapsed = 0;
+
+  while (elapsed < timeoutMs) {
+    if (await hasStopGenerating(page)) {
+      return { submitted: true, reason: 'stop-visible' };
+    }
+
+    const composerState = await getComposerState(page);
+
+    if (
+      composerState.available &&
+      composerState.text.length < 30 &&
+      !textLooksLikePrompt(composerState.text, promptText)
+    ) {
+      return { submitted: true, reason: 'composer-cleared' };
+    }
+
+    await sleep(interval);
+    elapsed += interval;
+  }
+
+  const composerState = await getComposerState(page);
+  return {
+    submitted: false,
+    reason: 'prompt-still-in-composer',
+    composerTextLength: composerState.text.length,
+  };
+}
+
+async function submitPrompt(page, text) {
+  const submitAttempts = [
+    {
+      name: 'composer submit button',
+      run: async () => clickComposerSubmitButton(page),
+    },
+    {
+      name: 'Control+Enter',
+      run: async () => {
+        await page.keyboard.press('Control+Enter');
+        return true;
+      },
+    },
+    {
+      name: 'Enter',
+      run: async () => {
+        await page.keyboard.press('Enter');
+        return true;
+      },
+    },
+  ];
+
+  for (let round = 0; round < 2; round += 1) {
+    for (const attempt of submitAttempts) {
+      await ensureComposerHasPrompt(page, text);
+      console.log(`[Claude] Submit attempt: ${attempt.name} (round ${round + 1})`);
+      const attempted = await attempt.run();
+
+      if (!attempted) {
+        continue;
+      }
+
+      const result = await waitForPromptSubmitted(page, text);
+
+      if (result.submitted) {
+        console.log('[Claude] Prompt submitted successfully via', attempt.name, `(${result.reason}).`);
+        return true;
+      }
+
+      console.warn(
+        '[Claude] Prompt did not submit after',
+        attempt.name,
+        `(${result.reason}, composer length: ${result.composerTextLength}).`
+      );
+
+      try {
+        await page.keyboard.press('Escape');
+      } catch {
+        // Ignore menu cleanup failures and keep the next submit attempt moving.
+      }
+      await sleep(500);
+    }
+  }
+
+  throw new Error(
+    'Prompt was not submitted to Claude. The send button was not found/clicked successfully, and keyboard submit did not clear the composer.'
+  );
+}
+
 async function hasVisibleText(page, patterns) {
   try {
     return await page.evaluate((rawPatterns) => {
@@ -969,32 +1319,15 @@ async function sendMessage(page, text) {
 
     if (!pasted) {
       console.log('[Claude] Applying fallback message insertion...');
-      await input.evaluate((element, value) => {
-        element.innerHTML = '';
-        element.textContent = value;
-        element.dispatchEvent(new InputEvent('input', { bubbles: true }));
-      }, text);
+      await setComposerText(page, text);
     }
 
     await sleep(1000);
+    await ensureComposerHasPrompt(page, text);
 
     console.log('[Claude] Looking for send button...');
-    const sendButton = await findSendButton(page);
-
-    if (sendButton) {
-      console.log('[Claude] Clicking send button...');
-      await sendButton.click();
-    } else {
-      console.log('[Claude] Send button not found, trying keyboard submit...');
-
-      try {
-        await page.keyboard.press('Control+Enter');
-      } catch {
-        await page.keyboard.press('Enter');
-      }
-    }
-
-    await sleep(2000);
+    await submitPrompt(page, text);
+    await sleep(1200);
     return responseBaseline;
   } catch (error) {
     console.warn('[Claude] sendMessage failed:', error.message);
@@ -1867,6 +2200,98 @@ async function getLatestResponseSnapshot(page) {
   });
 }
 
+async function getResponseSnapshotAfterSubmittedPrompt(page, submittedText) {
+  if (!submittedText || String(submittedText).trim().length < 80) {
+    return null;
+  }
+
+  try {
+    return await page.evaluate((rawSubmittedText) => {
+      const normalizeText = (value) =>
+        (value || '')
+          .replace(/\r/g, '')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n[ \t]+/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .replace(/\b(?:Retry|Try again|Continue generating|Stop generating)\b/g, '')
+          .replace(/\b(?:Reply\.\.\.|Claude is AI and can make mistakes\. Please double-check responses\.)\b/g, '')
+          .replace(/\bWant to be notified when Claude responds\?/gi, '')
+          .replace(/^\s*(?:Share|Copy|Like|Dislike|Notify|Dismiss|Write a message\.\.\.)\s*$/gim, '')
+          .replace(/^\s*(?:Sonnet|Opus|Haiku)\s+\d(?:\.\d)?(?:\s+Adaptive)?\s*$/gim, '')
+          .replace(/^\s*(?:Adaptive thinking|Adaptive|More models|Most efficient for everyday tasks|Thinks for more complex tasks)\s*$/gim, '')
+          .trim();
+
+      const main = document.querySelector('main') || document.body;
+      const pageText = normalizeText(main.innerText || document.body.innerText || '');
+      const submitted = normalizeText(rawSubmittedText);
+
+      if (!pageText || submitted.length < 80) {
+        return null;
+      }
+
+      const sampleStarts = [
+        0,
+        Math.max(0, Math.floor(submitted.length * 0.35) - 300),
+        Math.max(0, Math.floor(submitted.length * 0.7) - 300),
+        Math.max(0, submitted.length - 1200),
+        Math.max(0, submitted.length - 800),
+        Math.max(0, submitted.length - 500),
+      ];
+      const samples = Array.from(new Set(sampleStarts))
+        .map((start) => submitted.slice(start, start + 1200).trim())
+        .concat([
+          submitted.slice(-1000).trim(),
+          submitted.slice(-700).trim(),
+          submitted.slice(-450).trim(),
+        ])
+        .filter((sample) => sample.length >= 180)
+        .sort((left, right) => right.length - left.length);
+
+      let bestEnd = -1;
+      let bestSample = '';
+
+      for (const sample of samples) {
+        const index = pageText.lastIndexOf(sample);
+        if (index < 0) {
+          continue;
+        }
+
+        const end = index + sample.length;
+        if (end > bestEnd) {
+          bestEnd = end;
+          bestSample = sample;
+        }
+      }
+
+      if (bestEnd < 0) {
+        return null;
+      }
+
+      let text = pageText.slice(bestEnd);
+      text = normalizeText(text)
+        .replace(/^Claude responded:\s*/i, '')
+        .replace(/^\s*(?:Show more|pasted)\s*$/gim, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+      if (!text || text.length < 20) {
+        return null;
+      }
+
+      return {
+        text,
+        signature: `after-submitted:${bestEnd}:${text.length}:${bestSample.slice(0, 80)}:${text.slice(-300)}`,
+        count: 1,
+        sourceWeight: bestEnd,
+        source: 'after-submitted-prompt',
+        candidateCount: 1,
+      };
+    }, submittedText);
+  } catch {
+    return null;
+  }
+}
+
 function createResponseTooShortError({ stepNumber, minResponseChars, actualLength }) {
   const stepLabel = stepNumber ? ` for step ${stepNumber}` : '';
   const error = new Error(
@@ -2063,6 +2488,31 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
     return candidateText;
   };
 
+  const readCurrentResponse = async () => {
+    const snapshot = await getLatestResponseSnapshot(page);
+    let text =
+      snapshot.signature !== baseline.signature
+        ? getResponseTextFromSnapshot(snapshot)
+        : '';
+
+    const submittedPromptSnapshot = await getResponseSnapshotAfterSubmittedPrompt(
+      page,
+      baseline.submittedText
+    );
+
+    if (submittedPromptSnapshot) {
+      const submittedPromptText = getResponseTextFromSnapshot(submittedPromptSnapshot);
+      if (submittedPromptText.length > text.length) {
+        return {
+          snapshot: submittedPromptSnapshot,
+          text: submittedPromptText,
+        };
+      }
+    }
+
+    return { snapshot, text };
+  };
+
   await sleep(5000);
 
   while (elapsed < maxWait) {
@@ -2070,13 +2520,12 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
       const controlState = await getGenerationControlState(page);
 
       if (controlState.stopVisible) {
-        const activeSnapshot = await getLatestResponseSnapshot(page);
-        const activeResponseText = getResponseTextFromSnapshot(activeSnapshot);
+        const activeResponse = await readCurrentResponse();
         if (
-          activeSnapshot.signature !== baseline.signature &&
-          activeResponseText.length >= MIN_PARTIAL_RESPONSE_CHARS
+          activeResponse.snapshot.signature !== baseline.signature &&
+          activeResponse.text.length >= MIN_PARTIAL_RESPONSE_CHARS
         ) {
-          lastNewText = activeResponseText;
+          lastNewText = activeResponse.text;
         }
 
         if (!stopComposerReadyLogged) {
@@ -2107,11 +2556,8 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
         continue;
       }
 
-      const currentSnapshot = await getLatestResponseSnapshot(page);
-      const currentNewText =
-        currentSnapshot.signature !== baseline.signature
-          ? getResponseTextFromSnapshot(currentSnapshot)
-          : '';
+      const currentResponse = await readCurrentResponse();
+      const currentNewText = currentResponse.text;
 
       if (
         currentNewText.length >= MIN_PARTIAL_RESPONSE_CHARS &&
