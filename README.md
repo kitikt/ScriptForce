@@ -10,38 +10,25 @@ Bạn paste kịch bản gốc, bấm 1 nút, rồi có thể đi làm việc kh
 ScriptForge dùng Playwright để điều khiển Chromium, tự vào Claude.ai, tự gửi 8 prompt tuần tự, tự chờ response, rồi trả trạng thái và kết quả về web app qua WebSocket.
 Phiên đăng nhập được lưu trong profile Chromium để lần sau không cần login lại nếu session còn hiệu lực.
 
-## Cài đặt
+## Cài đặt nhanh
 Yêu cầu:
 
 - Node.js 18+
 - Tài khoản Claude.ai
 
-Mở thư mục project:
+Clone project rồi chạy setup ở thư mục root:
 
 ```bash
-cd C:\Users\MSI\Desktop\4LUA\scriptforge
-npm install
+git clone https://github.com/kitikt/ScriptForce.git
+cd ScriptForce
+npm run setup
 ```
 
-Client:
+Lệnh `npm run setup` sẽ tự cài dependency cho root, `client`, `server` và cài Chromium cho Playwright.
+
+Chạy project:
 
 ```bash
-cd client
-npm install
-```
-
-Server:
-
-```bash
-cd ..\server
-npm install
-npx playwright install chromium
-```
-
-Chạy project từ root:
-
-```bash
-cd ..
 npm run dev
 ```
 
@@ -50,6 +37,21 @@ npm run dev
 ```text
 Client: http://localhost:5173
 Server: http://localhost:3001
+```
+
+Nếu đã từng clone trước đó và chỉ muốn sửa lỗi thiếu `vite` / `express`, chạy lại từ root:
+
+```bash
+npm run setup
+```
+
+Hoặc cài từng phần thủ công:
+
+```bash
+npm install
+npm --workspace client install
+npm --workspace server install
+npm run browsers:install
 ```
 
 ## Sử dụng

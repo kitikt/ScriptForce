@@ -4,12 +4,18 @@
   "private": true,
   "description": "",
   "main": "index.js",
+  "workspaces": [
+    "client",
+    "server"
+  ],
   "scripts": {
     "predev": "node scripts/clean-dev-ports.js",
     "dev:clean": "node scripts/clean-dev-ports.js",
-    "dev:client": "cd client && npm run dev",
-    "dev:server": "cd server && node index.js",
+    "dev:client": "npm --workspace client run dev",
+    "dev:server": "npm --workspace server run dev",
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
+    "setup": "npm install && npm run browsers:install",
+    "browsers:install": "cd server && npx playwright install chromium",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
