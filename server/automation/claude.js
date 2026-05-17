@@ -572,6 +572,41 @@ async function clickIfVisible(locator) {
   return false;
 }
 
+async function scrollConversationToBottom(page) {
+  try {
+    await page.evaluate(() => {
+      const scrollToBottom = (element) => {
+        if (!element) {
+          return;
+        }
+
+        try {
+          element.scrollTop = element.scrollHeight;
+        } catch {
+          // Ignore elements that do not support scrolling.
+        }
+      };
+
+      scrollToBottom(document.scrollingElement || document.documentElement);
+      scrollToBottom(document.body);
+
+      for (const element of document.querySelectorAll('main, [role="main"], [class*="overflow"], [class*="scroll"]')) {
+        const style = window.getComputedStyle(element);
+        const canScroll =
+          element.scrollHeight > element.clientHeight + 20 &&
+          /(auto|scroll)/.test(`${style.overflowY} ${style.overflow}`);
+
+        if (canScroll) {
+          scrollToBottom(element);
+        }
+      }
+    });
+    await sleep(300);
+  } catch {
+    // Scrolling is a best-effort stabilization step.
+  }
+}
+
 async function extractConversationMessages(page) {
   return page.evaluate(() => {
     const nodes = Array.from(
@@ -1493,6 +1528,7 @@ async function sendMessage(page, text) {
     console.log('[Claude] Looking for send button...');
     await submitPrompt(page, text);
     await sleep(1200);
+    await scrollConversationToBottom(page);
     return responseBaseline;
   } catch (error) {
     console.warn('[Claude] sendMessage failed:', error.message);
@@ -2727,6 +2763,521 @@ async function getResponseSnapshotAfterBaseline(page, baselineText, submittedTex
   }
 }
 
+async function getLastAssistantResponseSnapshot(page, baselineText, submittedText) {
+  try {
+    return await page.evaluate(({ rawBaselineText, rawSubmittedText }) => {
+      const normalizeText = (value) =>
+        (value || '')
+          .replace(/\r/g, '')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n[ \t]+/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .replace(/\b(?:Retry|Try again|Continue generating|Stop generating)\b/g, '')
+          .replace(/\b(?:Reply\.\.\.|Claude is AI and can make mistakes\. Please double-check responses\.)\b/g, '')
+          .replace(/\bWant to be notified when Claude responds\?/gi, '')
+          .replace(/^\s*(?:Share|Copy|Like|Dislike|Notify|Dismiss|Write a message\.\.\.)\s*$/gim, '')
+          .replace(/^\s*(?:Sonnet|Opus|Haiku)\s+\d(?:\.\d)?(?:\s+Adaptive)?\s*$/gim, '')
+          .replace(/^\s*(?:Adaptive thinking|Adaptive|More models|Most efficient for everyday tasks|Thinks for more complex tasks)\s*$/gim, '')
+          .trim();
+
+      const normalizeComparableText = (value) =>
+        normalizeText(value)
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+
+      const isVisibleBox = (rect) =>
+        rect && rect.width > 0 && rect.height > 0;
+
+      const isElementVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          isVisibleBox(rect) &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden'
+        );
+      };
+
+      const getComposerTop = () => {
+        const composers = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+          .filter((element) => isElementVisible(element));
+        const composer = composers[composers.length - 1];
+
+        if (!composer) {
+          return Number.POSITIVE_INFINITY;
+        }
+
+        return composer.getBoundingClientRect().top;
+      };
+
+      const shouldSkipElement = (element) => {
+        if (!element) {
+          return true;
+        }
+
+        if (element.closest('[contenteditable="true"]')) {
+          return true;
+        }
+
+        if (
+          element.closest('button, [role="button"], input, textarea, select, nav, aside, header, footer, script, style, noscript')
+        ) {
+          return true;
+        }
+
+        if (
+          element.closest('[data-testid*="toast" i], [data-testid*="notification" i], [class*="toast" i], [class*="notification" i]')
+        ) {
+          return true;
+        }
+
+        const elementText = element.innerText || element.textContent || '';
+        if (
+          elementText.length < 500 &&
+          /Want to be notified when Claude responds|Claude is AI and can make mistakes|Write a message/i.test(elementText)
+        ) {
+          return true;
+        }
+
+        return false;
+      };
+
+      const stripKnownText = (candidateText, knownText, options = {}) => {
+        if (!candidateText || !knownText || knownText.length < 80) {
+          return candidateText || '';
+        }
+
+        if (candidateText === knownText) {
+          return '';
+        }
+
+        const prefixOnly = Boolean(options.prefixOnly);
+        const directIndex = candidateText.lastIndexOf(knownText);
+
+        if (directIndex >= 0 && (!prefixOnly || directIndex <= 500)) {
+          return candidateText.slice(directIndex + knownText.length).trim();
+        }
+
+        const knownTail = knownText.slice(-500).trim();
+        if (knownTail.length >= 80) {
+          const tailIndex = candidateText.lastIndexOf(knownTail);
+          if (tailIndex >= 0 && (!prefixOnly || tailIndex <= 500)) {
+            return candidateText.slice(tailIndex + knownTail.length).trim();
+          }
+        }
+
+        const knownHead = knownText.slice(0, 500).trim();
+        if (knownHead.length >= 80) {
+          const headIndex = candidateText.indexOf(knownHead);
+          if (headIndex >= 0 && candidateText.length > knownText.length) {
+            return candidateText.slice(headIndex + knownText.length).trim();
+          }
+        }
+
+        return candidateText;
+      };
+
+      const baseline = normalizeText(rawBaselineText);
+      const submitted = normalizeText(rawSubmittedText);
+      const baselineComparable = normalizeComparableText(rawBaselineText);
+      const submittedComparable = normalizeComparableText(rawSubmittedText);
+
+      const isBaselineText = (text) => {
+        const comparable = normalizeComparableText(text);
+
+        if (!comparable || !baselineComparable) {
+          return false;
+        }
+
+        return (
+          comparable === baselineComparable ||
+          (
+            comparable.length >= baselineComparable.length * 0.9 &&
+            comparable.includes(baselineComparable.slice(0, 220)) &&
+            comparable.includes(baselineComparable.slice(-320))
+          )
+        );
+      };
+
+      const isSubmittedPromptText = (text) => {
+        const comparable = normalizeComparableText(text);
+
+        if (!comparable || !submittedComparable) {
+          return false;
+        }
+
+        return (
+          comparable === submittedComparable ||
+          (
+            comparable.length >= 120 &&
+            comparable.length <= submittedComparable.length * 1.1 &&
+            submittedComparable.includes(comparable)
+          )
+        );
+      };
+
+      const isUiNoise = (text) => {
+        const comparable = normalizeComparableText(text);
+
+        return (
+          comparable.length <= 400 &&
+          /want to be notified when claude responds|write a message|claude is ai and can make mistakes|sonnet \d|opus \d|haiku \d|adaptive thinking|more models|most efficient for everyday tasks/.test(comparable)
+        );
+      };
+
+      const getRole = (element, text) => {
+        const rawMeta = [
+          element.getAttribute('data-message-author-role'),
+          element.getAttribute('data-testid'),
+          element.getAttribute('aria-label'),
+          element.className,
+        ].join(' ').toLowerCase();
+
+        if (rawMeta.includes('user') || rawMeta.includes('human')) {
+          return 'user';
+        }
+
+        if (rawMeta.includes('assistant') || rawMeta.includes('claude')) {
+          return 'assistant';
+        }
+
+        if (isSubmittedPromptText(text)) {
+          return 'user';
+        }
+
+        return 'unknown';
+      };
+
+      const main = document.querySelector('main') || document.body;
+      const composerTop = getComposerTop();
+      const selector = [
+        '[data-message-author-role]',
+        '[data-testid*="message" i]',
+        '[data-testid*="assistant" i]',
+        '[data-testid*="conversation" i]',
+        '[class*="font-claude-message"]',
+        '[class*="prose"]',
+        '[class*="markdown"]',
+        '[class*="message" i]',
+        'article'
+      ].join(', ');
+
+      const candidates = [];
+      const seen = new Set();
+
+      Array.from(main.querySelectorAll(selector)).forEach((element, index) => {
+        if (shouldSkipElement(element) || !isElementVisible(element)) {
+          return;
+        }
+
+        const rect = element.getBoundingClientRect();
+        if (rect.top >= composerTop - 4 || rect.bottom <= 0) {
+          return;
+        }
+
+        let text = normalizeText(element.innerText || element.textContent || '');
+        if (!text || text.length < 100 || isUiNoise(text)) {
+          return;
+        }
+
+        const role = getRole(element, text);
+        if (role === 'user') {
+          return;
+        }
+
+        text = stripKnownText(text, submitted);
+        text = stripKnownText(text, baseline, { prefixOnly: true });
+        text = stripKnownText(text, submitted).trim();
+
+        if (!text || text.length < 100 || isBaselineText(text) || isSubmittedPromptText(text) || isUiNoise(text)) {
+          return;
+        }
+
+        const comparable = normalizeComparableText(text);
+        if (!comparable || seen.has(comparable)) {
+          return;
+        }
+
+        seen.add(comparable);
+
+        candidates.push({
+          index,
+          text,
+          role,
+          bottom: rect.bottom,
+          priority: role === 'assistant' ? 2 : 1,
+        });
+      });
+
+      const best = candidates
+        .sort((left, right) => {
+          if (left.index !== right.index) {
+            return right.index - left.index;
+          }
+
+          if (left.priority !== right.priority) {
+            return right.priority - left.priority;
+          }
+
+          return right.bottom - left.bottom;
+        })[0];
+
+      if (!best) {
+        return null;
+      }
+
+      return {
+        text: best.text,
+        signature: `last-assistant:${best.index}:${best.text.length}:${best.text.slice(0, 80)}:${best.text.slice(-300)}`,
+        count: candidates.length,
+        sourceWeight: best.index,
+        source: 'last-assistant',
+        candidateCount: candidates.length,
+      };
+    }, {
+      rawBaselineText: baselineText || '',
+      rawSubmittedText: submittedText || '',
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function getConversationResponseSnapshotViaApi(page, baselineText, submittedText) {
+  try {
+    return await page.evaluate(async ({ rawBaselineText, rawSubmittedText }) => {
+      const normalizeText = (value) =>
+        (value || '')
+          .replace(/\r/g, '')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n[ \t]+/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+
+      const normalizeComparableText = (value) =>
+        normalizeText(value)
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+
+      const baseline = normalizeText(rawBaselineText);
+      const submitted = normalizeText(rawSubmittedText);
+      const baselineComparable = normalizeComparableText(baseline);
+      const submittedComparable = normalizeComparableText(submitted);
+      const chatId = window.location.pathname.match(/\/chat\/([a-f0-9-]+)/i)?.[1];
+
+      if (!chatId) {
+        return null;
+      }
+
+      const isBaselineText = (text) => {
+        const comparable = normalizeComparableText(text);
+
+        if (!comparable || !baselineComparable) {
+          return false;
+        }
+
+        return (
+          comparable === baselineComparable ||
+          (
+            comparable.length >= baselineComparable.length * 0.9 &&
+            comparable.includes(baselineComparable.slice(0, 220)) &&
+            comparable.includes(baselineComparable.slice(-320))
+          )
+        );
+      };
+
+      const isSubmittedPromptText = (text) => {
+        const comparable = normalizeComparableText(text);
+
+        if (!comparable || !submittedComparable) {
+          return false;
+        }
+
+        return (
+          comparable === submittedComparable ||
+          (
+            comparable.length >= 120 &&
+            comparable.length <= submittedComparable.length * 1.1 &&
+            submittedComparable.includes(comparable)
+          )
+        );
+      };
+
+      const collectTextParts = (value, depth = 0) => {
+        if (depth > 8 || value == null) {
+          return [];
+        }
+
+        if (typeof value === 'string') {
+          const text = normalizeText(value);
+          return text ? [text] : [];
+        }
+
+        if (Array.isArray(value)) {
+          return value.flatMap((item) => collectTextParts(item, depth + 1));
+        }
+
+        if (typeof value !== 'object') {
+          return [];
+        }
+
+        const textKeys = [
+          'text',
+          'content',
+          'completion',
+          'response',
+          'message',
+        ];
+        const parts = [];
+
+        for (const key of textKeys) {
+          if (Object.prototype.hasOwnProperty.call(value, key)) {
+            parts.push(...collectTextParts(value[key], depth + 1));
+          }
+        }
+
+        return parts;
+      };
+
+      const readRole = (value) => {
+        if (!value || typeof value !== 'object') {
+          return '';
+        }
+
+        const rawRole = [
+          value.role,
+          value.sender,
+          value.author,
+          value.author_role,
+          value.sender_role,
+          value.message_author_role,
+          value.type,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+
+        if (/assistant|claude/.test(rawRole)) {
+          return 'assistant';
+        }
+
+        if (/human|user/.test(rawRole)) {
+          return 'user';
+        }
+
+        return '';
+      };
+
+      const findMessages = (value, depth = 0, output = []) => {
+        if (depth > 10 || value == null) {
+          return output;
+        }
+
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            findMessages(item, depth + 1, output);
+          }
+          return output;
+        }
+
+        if (typeof value !== 'object') {
+          return output;
+        }
+
+        const role = readRole(value);
+        if (role) {
+          const text = normalizeText(collectTextParts(value).join('\n\n'));
+
+          if (text.length >= 20) {
+            output.push({ role, text });
+          }
+        }
+
+        for (const key of [
+          'chat_messages',
+          'messages',
+          'turns',
+          'conversation',
+          'children',
+          'items',
+          'data',
+          'results',
+        ]) {
+          if (Object.prototype.hasOwnProperty.call(value, key)) {
+            findMessages(value[key], depth + 1, output);
+          }
+        }
+
+        return output;
+      };
+
+      const orgRes = await fetch('https://claude.ai/api/organizations', {
+        credentials: 'include',
+      });
+
+      if (!orgRes.ok) {
+        return null;
+      }
+
+      const orgs = await orgRes.json();
+      const orgList = Array.isArray(orgs) ? orgs : [];
+
+      for (const org of orgList) {
+        const orgId = org?.uuid;
+        if (!orgId) {
+          continue;
+        }
+
+        const url =
+          `https://claude.ai/api/organizations/${orgId}/chat_conversations/${chatId}`;
+        const response = await fetch(url, { credentials: 'include' });
+
+        if (!response.ok) {
+          continue;
+        }
+
+        const data = await response.json();
+        const messages = findMessages(data);
+        const assistantMessages = messages
+          .filter((message) => message.role === 'assistant')
+          .filter((message) =>
+            message.text.length >= 100 &&
+            !isBaselineText(message.text) &&
+            !isSubmittedPromptText(message.text)
+          );
+        const best = assistantMessages.at(-1);
+
+        if (!best) {
+          continue;
+        }
+
+        return {
+          text: best.text,
+          signature: `api-conversation:${chatId}:${assistantMessages.length}:${best.text.length}:${best.text.slice(0, 80)}:${best.text.slice(-300)}`,
+          count: assistantMessages.length,
+          sourceWeight: assistantMessages.length,
+          source: 'api-conversation',
+          candidateCount: assistantMessages.length,
+        };
+      }
+
+      return null;
+    }, {
+      rawBaselineText: baselineText || '',
+      rawSubmittedText: submittedText || '',
+    });
+  } catch {
+    return null;
+  }
+}
+
 function createResponseTooShortError({ stepNumber, minResponseChars, actualLength }) {
   const stepLabel = stepNumber ? ` for step ${stepNumber}` : '';
   const error = new Error(
@@ -2755,6 +3306,7 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
   let stableCount = 0;
   let retryCount = 0;
   let stopComposerReadyLogged = false;
+  let lastCapturedSource = '';
   const baseline = responseBaseline || await getLatestResponseSnapshot(page);
   console.log('[Claude] Baseline response length:', baseline.text.length);
 
@@ -2961,6 +3513,38 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
       }
     }
 
+    const lastAssistantSnapshot = await getLastAssistantResponseSnapshot(
+      page,
+      baseline.text,
+      baseline.submittedText
+    );
+
+    if (lastAssistantSnapshot) {
+      const lastAssistantText = getResponseTextFromSnapshot(lastAssistantSnapshot);
+      if (lastAssistantText.length > text.length) {
+        return {
+          snapshot: lastAssistantSnapshot,
+          text: lastAssistantText,
+        };
+      }
+    }
+
+    const apiSnapshot = await getConversationResponseSnapshotViaApi(
+      page,
+      baseline.text,
+      baseline.submittedText
+    );
+
+    if (apiSnapshot) {
+      const apiText = getResponseTextFromSnapshot(apiSnapshot);
+      if (apiText.length > text.length) {
+        return {
+          snapshot: apiSnapshot,
+          text: apiText,
+        };
+      }
+    }
+
     return { snapshot, text };
   };
 
@@ -2971,12 +3555,22 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
       const controlState = await getGenerationControlState(page);
 
       if (controlState.stopVisible) {
+        await scrollConversationToBottom(page);
         const activeResponse = await readCurrentResponse();
         if (
           activeResponse.snapshot.signature !== baseline.signature &&
           activeResponse.text.length >= MIN_PARTIAL_RESPONSE_CHARS
         ) {
           lastNewText = activeResponse.text;
+          if (activeResponse.snapshot.source !== lastCapturedSource) {
+            lastCapturedSource = activeResponse.snapshot.source;
+            console.log(
+              '[Claude] Capturing response via',
+              lastCapturedSource,
+              'length:',
+              lastNewText.length
+            );
+          }
         }
 
         if (!stopComposerReadyLogged) {
@@ -3007,6 +3601,7 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
         continue;
       }
 
+      await scrollConversationToBottom(page);
       const currentResponse = await readCurrentResponse();
       const currentNewText = currentResponse.text;
 
@@ -3019,6 +3614,15 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
         stableCount = 0;
         if (currentNewText.length > 0) {
           lastNewText = currentNewText;
+          if (currentResponse.snapshot.source !== lastCapturedSource) {
+            lastCapturedSource = currentResponse.snapshot.source;
+            console.log(
+              '[Claude] Capturing response via',
+              lastCapturedSource,
+              'length:',
+              lastNewText.length
+            );
+          }
         }
       }
 
