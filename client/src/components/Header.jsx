@@ -11,7 +11,7 @@ function Header() {
         </div>
         <div>
           <h1>ScriptForge</h1>
-          <p>AI Script Pipeline Automation</p>
+          <p>Tự động hóa pipeline viết kịch bản AI</p>
         </div>
       </div>
     </header>

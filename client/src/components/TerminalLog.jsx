@@ -19,8 +19,8 @@ function TerminalLog({ logs, onClear, currentStep = 0, totalSteps = 8 }) {
   const lastLog = logs[logs.length - 1]
   const statusText =
     currentStep > 0 && currentStep <= totalSteps
-      ? `Step ${currentStep}/${totalSteps} running...`
-      : `${logs.length} logs`
+      ? `Đang chạy bước ${currentStep}/${totalSteps}...`
+      : `${logs.length} log`
 
   useEffect(() => {
     if (viewportRef.current && !isMinimized) {
@@ -59,7 +59,7 @@ function TerminalLog({ logs, onClear, currentStep = 0, totalSteps = 8 }) {
         <button
           type="button"
           className={styles.overlay}
-          aria-label="Exit fullscreen"
+          aria-label="Thoát toàn màn hình"
           onClick={() => setIsFullscreen(false)}
         />
       )}
@@ -70,22 +70,22 @@ function TerminalLog({ logs, onClear, currentStep = 0, totalSteps = 8 }) {
             <button
               type="button"
               className={`${styles.light} ${styles.red}`}
-              title="Clear log"
-              aria-label="Clear log"
+              title="Xóa log"
+              aria-label="Xóa log"
               onClick={handleClear}
             />
             <button
               type="button"
               className={`${styles.light} ${styles.yellow}`}
-              title={isMinimized ? 'Expand' : 'Minimize'}
-              aria-label={isMinimized ? 'Expand terminal' : 'Minimize terminal'}
+              title={isMinimized ? 'Mở rộng' : 'Thu nhỏ'}
+              aria-label={isMinimized ? 'Mở rộng terminal' : 'Thu nhỏ terminal'}
               onClick={() => setIsMinimized((value) => !value)}
             />
             <button
               type="button"
               className={`${styles.light} ${styles.green}`}
-              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-              aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen terminal'}
+              title={isFullscreen ? 'Thoát toàn màn hình' : 'Toàn màn hình'}
+              aria-label={isFullscreen ? 'Thoát toàn màn hình' : 'Mở terminal toàn màn hình'}
               onClick={() => setIsFullscreen((value) => !value)}
             />
           </div>
@@ -99,7 +99,7 @@ function TerminalLog({ logs, onClear, currentStep = 0, totalSteps = 8 }) {
           ) : logs.length === 0 ? (
             <div className={styles.empty}>
               <span className={styles.prompt}>$</span>
-              <span>Waiting for pipeline logs...</span>
+              <span>Đang chờ log pipeline...</span>
             </div>
           ) : (
             logs.map((log, index) => (

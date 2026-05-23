@@ -2,13 +2,6 @@ function normalizeScript(originalScript) {
   return typeof originalScript === 'string' ? originalScript : '';
 }
 
-const RANDOM_NAME_RULE = `QUY TẮC TÊN NHÂN VẬT BẮT BUỘC:
-Đổi tên toàn bộ dàn nhân vật chính và phụ. Không được dùng các tên Clara, Eleanor, Elanor, Ruth, Ellie ở bất kỳ đâu trong bản mới.
-Luôn random tên nhân vật ngẫu nhiên cho mỗi câu chuyện bằng cách tự tạo một seed từ bối cảnh, năm xảy ra câu chuyện, nghề nghiệp nhân vật chính và xung đột trung tâm.
-Tên phải là tên Anh Mỹ hợp lý với bối cảnh Hoa Kỳ, không dùng tên Latin nổi bật, không dùng tên Trung Quốc, Hán, Việt Nam hoặc tên nghe không phù hợp văn hóa Mỹ.
-Ưu tiên tên Mỹ ít phổ biến nhưng vẫn tự nhiên, dễ đọc, phù hợp tuổi, giới tính, vùng miền và thời kỳ.
-Sau khi đã random ở dàn ý, các phần sau phải giữ nhất quán toàn bộ tên đó, trừ bước sửa cuối nếu được yêu cầu đổi lại toàn bộ.`;
-
 const STEPS = [
   {
     stepNumber: 1,
@@ -69,8 +62,6 @@ Không được mâu thuẫn với các sự kiện chính của câu chuyện g
 Mỗi phần phải có ít nhất 2 xung đột giữa người với người, không chỉ xung đột người với thiên nhiên hoặc người với hoàn cảnh.
 Thêm ít nhất 3 nhân vật phụ có vai trò rõ ràng gây trở ngại hoặc hỗ trợ nhân vật chính, tạo tương tác cảm xúc.
 
-${RANDOM_NAME_RULE}
-
 QUY TẮC CHỐNG LẶP BẮT BUỘC CHO DÀN Ý:
 Mỗi thông tin khoa học, kỹ thuật, hoặc giải thích cơ chế chỉ được xuất hiện TỐI ĐA 1 LẦN trong toàn bộ kịch bản.
 Nếu cần nhắc lại ở phần sau, phải thông qua hành động nhân vật hoặc tình huống mới, KHÔNG được giải thích lại bằng lời kể.
@@ -123,16 +114,16 @@ Không tự ý tăng tuổi nhân vật quá nhiều.
 Bám sát các sự kiện chính của chuyện gốc.
 Dàn ý viết toàn bộ bằng tiếng Việt, chỉ có tên nhân vật và địa danh thì giữ nguyên tiếng Anh để tôi có thể đọc hiểu.
 
-${RANDOM_NAME_RULE}
-
 Không bao giờ được tạo file. Chỉ trả lời trong chat.`;
     },
   },
   {
     stepNumber: 4,
-    name: 'Viết Part 1',
+    name: 'Bước 5: Viết Part 1',
     buildPrompt() {
-      return `DỰA VÀO DÀN Ý CHI TIẾT VIẾT PHẦN 1, ĐỘ DÀI 5.000 ĐẾN 5.500 TỪ BẰNG TIẾNG ANH.
+      return `BƯỚC 5:
+
+DỰA VÀO DÀN Ý CHI TIẾT VIẾT PHẦN 1, ĐỘ DÀI 5.000 ĐẾN 5.500 TỪ BẰNG TIẾNG ANH.
 ĐẢM BẢO ĐẦY ĐỦ TWIST, ĐẢM BẢO ĐỦ THÔNG TIN TRONG DÀN Ý.
 
 Chú ý:
@@ -140,9 +131,6 @@ KHÔNG sử dụng BẤT KỲ DẤU GẠCH NÀO TRONG BÀI.
 Trả kết quả thường, không phải txt.
 Không tạo file, chỉ trả lời trong chat.
 Lưu ý cân đối nội dung để cả kịch bản có tổng độ dài từ 16.000 đến 17.000 từ.
-
-${RANDOM_NAME_RULE}
-Ở bước này, dùng đúng bộ tên đã được random và chốt trong dàn ý gần nhất. Không đổi tên tùy tiện giữa các phần.
 
 QUY TẮC CHỐNG LẶP KHI VIẾT:
 Mỗi khái niệm khoa học hoặc kỹ thuật chỉ được giải thích CHI TIẾT 1 lần duy nhất trong toàn bộ kịch bản.
@@ -162,18 +150,17 @@ Do not write "_____" in the end of each part.`;
   },
   {
     stepNumber: 5,
-    name: 'Viết Part 2',
+    name: 'Bước 6: Viết Part 2',
     buildPrompt() {
-      return `DỰA VÀO DÀN Ý CHI TIẾT VÀ PHẦN 1 ĐÃ VIẾT, VIẾT PHẦN 2 ĐỘ DÀI 5.000 ĐẾN 5.700 TỪ BẰNG TIẾNG ANH.
+      return `BƯỚC 6:
+
+DỰA VÀO DÀN Ý CHI TIẾT VÀ PHẦN 1 ĐÃ VIẾT, VIẾT PHẦN 2 ĐỘ DÀI 5.000 ĐẾN 5.700 TỪ BẰNG TIẾNG ANH.
 ĐẢM BẢO ĐẦY ĐỦ TWIST VÀ CLIMAX THEO DÀN Ý.
 
 Chú ý:
 KHÔNG sử dụng BẤT KỲ DẤU GẠCH NÀO TRONG BÀI.
 Trả kết quả thường, không phải txt.
 Không được tạo file, chỉ trả lời trong chat.
-
-${RANDOM_NAME_RULE}
-Ở bước này, giữ đúng bộ tên đã dùng trong Phần 1. Không tự đổi tên nhân vật.
 
 QUY TẮC CHỐNG LẶP:
 Trước khi viết, hãy liệt kê tất cả các khái niệm và so sánh đã xuất hiện trong Phần 1.
@@ -195,9 +182,11 @@ Do not write "_____" in the end of each part.`;
   },
   {
     stepNumber: 6,
-    name: 'Viết Part 3',
+    name: 'Bước 7: Viết Part 3',
     buildPrompt() {
-      return `DỰA VÀO DÀN Ý CHI TIẾT VÀ PHẦN 1, PHẦN 2 ĐÃ VIẾT, VIẾT PHẦN 3 ĐỘ DÀI 5.000 ĐẾN 5.700 TỪ BẰNG TIẾNG ANH.
+      return `BƯỚC 7:
+
+DỰA VÀO DÀN Ý CHI TIẾT VÀ PHẦN 1, PHẦN 2 ĐÃ VIẾT, VIẾT PHẦN 3 ĐỘ DÀI 5.000 ĐẾN 5.700 TỪ BẰNG TIẾNG ANH.
 ĐẢM BẢO ĐẦY ĐỦ TWIST VÀ CLIMAX CUỐI CÙNG THEO DÀN Ý.
 ĐẢM BẢO KẾT THÚC HOÀN THIỆN, THỎA MÃN NGƯỜI XEM.
 
@@ -205,9 +194,6 @@ Chú ý:
 KHÔNG sử dụng BẤT KỲ DẤU GẠCH NÀO TRONG BÀI.
 Trả kết quả thường, không phải txt.
 Không được tạo file, chỉ trả lời trong chat.
-
-${RANDOM_NAME_RULE}
-Ở bước này, giữ đúng bộ tên đã dùng trong Phần 1 và Phần 2. Không tự đổi tên nhân vật.
 
 QUY TẮC CHỐNG LẶP:
 Trước khi viết, hãy liệt kê tất cả các khái niệm và so sánh đã xuất hiện trong Phần 1 và Phần 2.
@@ -277,15 +263,14 @@ Vị trí chính xác, trích dẫn câu mở đầu của đoạn có lỗi.
 Mô tả lỗi.
 Cách sửa cụ thể.
 
-${RANDOM_NAME_RULE}
-Không đổi tên trong bước kiểm tra nếu kịch bản đã nhất quán và không dùng tên bị cấm. Nếu phát hiện tên bị cấm, phải ghi rõ là lỗi cần sửa ở bước 7B.`;
+Chỉ báo lỗi có thật theo các tiêu chí kiểm tra ở trên.`;
     },
   },
   {
     stepNumber: 8,
-    name: 'Bước 7b: Sửa và tạo file hoàn chỉnh',
+    name: 'Bước 8: Sửa và tạo file hoàn chỉnh',
     buildPrompt() {
-      return `BƯỚC 7B: SỬA VÀ TẠO FILE HOÀN CHỈNH
+      return `BƯỚC 8: SỬA VÀ TẠO FILE HOÀN CHỈNH
 
 NẾU bước trên đánh giá DƯỚI 9.5 ĐIỂM:
 Dựa vào danh sách lỗi ở bước trên, hãy sửa TẤT CẢ các lỗi đã liệt kê.
@@ -301,14 +286,7 @@ Tên file TXT đã tạo là gì.
 NẾU bước trên đánh giá TỪ 9.5 ĐIỂM TRỞ LÊN:
 Không cần viết lại toàn bộ nếu không có lỗi thật.
 Chỉ xác nhận ngắn gọn trong chat rằng kịch bản đạt yêu cầu.
-Nếu kịch bản vẫn còn tên bị cấm hoặc tên không phù hợp văn hóa Mỹ, vẫn phải sửa và tạo TXT mới dù điểm số trên 9.5.
-
-${RANDOM_NAME_RULE}
-Ở bước này, nếu cần sửa tên, phải đổi tên toàn bộ dàn nhân vật trong toàn bộ kịch bản một cách nhất quán.
-Không được dùng Clara, Eleanor, Elanor, Ruth, Ellie ở bất kỳ đâu.
-Không dùng tên Trung Quốc, Hán, Việt Nam hoặc tên nghe sai văn hóa Mỹ.
-Tên phải nghe như người Mỹ thật, ít phổ biến nhưng hợp lý với tuổi, giới tính, vùng miền và thời kỳ.
-Không bịa lỗi mới. Chỉ sửa lỗi thật đã được phát hiện hoặc lỗi tên bị cấm.`;
+Không bịa lỗi mới. Chỉ sửa lỗi thật đã được phát hiện.`;
     },
   },
 ];

@@ -4,21 +4,21 @@
   gap: 0.6rem;
   border: none;
   border-radius: 18px;
-  background: linear-gradient(90deg, #00d4aa, #00b894);
-  color: #031312;
+  background: linear-gradient(90deg, #f3e8ff, #c4a1ff 55%, #9f7aea);
+  color: #2f174a;
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.95rem;
   font-weight: 700;
   padding: 1rem 1.2rem;
   cursor: pointer;
-  box-shadow: 0 4px 20px rgba(0, 212, 170, 0.3);
+  box-shadow: 0 0 28px rgba(196, 161, 255, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.45);
   transition: transform 0.2s ease, filter 0.2s ease, box-shadow 0.2s ease;
 }
 
 .button:hover {
   transform: translateY(-1px) scale(1.02);
   filter: brightness(1.08);
-  box-shadow: 0 12px 36px rgba(0, 212, 170, 0.36);
+  box-shadow: 0 12px 36px rgba(196, 161, 255, 0.42);
 }
 
 @media (max-width: 980px) {

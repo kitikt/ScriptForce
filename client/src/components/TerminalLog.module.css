@@ -10,12 +10,18 @@
 
 .terminal {
   position: relative;
-  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(222, 204, 255, 0.18);
   border-radius: 24px;
-  background: linear-gradient(180deg, rgba(26, 26, 46, 0.92), rgba(10, 10, 15, 0.96));
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+  background: linear-gradient(155deg, rgba(72, 60, 104, 0.38), rgba(9, 8, 18, 0.78));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 24px 70px rgba(0, 0, 0, 0.3), 0 0 34px rgba(196, 161, 255, 0.1);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
   transition: transform 0.3s ease, opacity 0.3s ease, min-height 0.3s ease;
 }
 
@@ -29,6 +35,7 @@
 }
 
 .terminal.minimized {
+  height: auto;
   min-height: auto;
 }
 
@@ -37,8 +44,8 @@
   align-items: center;
   gap: 1rem;
   padding: 0.95rem 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(222, 204, 255, 0.12);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .lights {
@@ -77,11 +84,11 @@
 }
 
 .green {
-  background: #00d4aa;
+  background: #c4a1ff;
 }
 
 .green:hover {
-  box-shadow: 0 0 0 4px rgba(0, 212, 170, 0.16), 0 0 16px rgba(0, 212, 170, 0.5);
+  box-shadow: 0 0 0 4px rgba(196, 161, 255, 0.2), 0 0 16px rgba(196, 161, 255, 0.5);
 }
 
 .title {
@@ -99,8 +106,8 @@
 }
 
 .viewport {
-  max-height: calc(100vh - 250px);
-  min-height: 520px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 1rem 1.1rem 1.2rem;
   background:
@@ -152,7 +159,7 @@
 }
 
 .prompt {
-  color: #00d4aa;
+  color: #c4a1ff;
 }
 
 .message {

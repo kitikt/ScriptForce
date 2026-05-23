@@ -19,6 +19,14 @@ const CONTEXT_LIMIT_PATTERNS = [
   /context limit/i,
   /reduce the length/i,
 ];
+const CLAUDE_CONNECTION_ERROR_PATTERNS = [
+  /we (?:couldn['’]?t|could not) connect to claude/i,
+  /(?:couldn['’]?t|could not) connect to claude/i,
+  /unable to connect to claude/i,
+  /problem connecting to claude/i,
+  /connection (?:to claude )?(?:failed|lost|interrupted)/i,
+  /network error/i,
+];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -33,6 +41,14 @@ async function randomDelay(minMs = 1000, maxMs = 3000) {
 
 function normalizeClaudeUrl(url, baseUrl = CLAUDE_ORIGIN) {
   return new URL(url, baseUrl).toString();
+}
+
+function createClaudeConnectionError(message) {
+  const error = new Error(
+    message || 'Claude connection error detected. The response was not completed.'
+  );
+  error.code = 'CLAUDE_CONNECTION_ERROR';
+  return error;
 }
 
 function toRelativeClaudeUrl(url) {
@@ -114,19 +130,9 @@ async function hasTransientClaudeOverlay(page) {
   }
 }
 
-async function closeTransientClaudeUi(page) {
+async function clearClaudePointerBlockers(page) {
   try {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      if (!await hasTransientClaudeOverlay(page)) {
-        return false;
-      }
-
-      await page.keyboard.press('Escape');
-      await sleep(300);
-    }
-
-    const disabledBlockers = await page.evaluate(() => {
-      let count = 0;
+    return await page.evaluate(() => {
       const isVisible = (element) => {
         const rect = element.getBoundingClientRect();
         const style = window.getComputedStyle(element);
@@ -139,18 +145,84 @@ async function closeTransientClaudeUi(page) {
           style.pointerEvents !== 'none'
         );
       };
+      const composer = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+        .filter((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })
+        .pop();
+      const composerRect = composer?.getBoundingClientRect();
+      const points = composerRect
+        ? [
+            [composerRect.left + composerRect.width / 2, composerRect.top + composerRect.height / 2],
+            [composerRect.left + 24, composerRect.top + Math.min(24, composerRect.height / 2)],
+          ]
+        : [];
+      let disabled = 0;
 
-      for (const blocker of document.querySelectorAll('[data-base-ui-portal] [data-base-ui-inert][role="presentation"]')) {
-        if (!isVisible(blocker)) {
+      const disableElement = (element) => {
+        if (!element || !isVisible(element)) {
+          return;
+        }
+
+        element.style.pointerEvents = 'none';
+        element.setAttribute('data-scriptforge-pointer-disabled', 'true');
+        disabled += 1;
+      };
+
+      const blockerSelectors = [
+        '[data-base-ui-portal] [data-base-ui-inert]',
+        '[data-base-ui-portal] [role="presentation"]',
+        '[data-radix-portal] [role="presentation"]',
+        '[data-scriptforge-stale-overlay]',
+      ];
+
+      for (const blocker of document.querySelectorAll(blockerSelectors.join(','))) {
+        const text = (blocker.innerText || blocker.textContent || '').trim();
+        if (text.length > 0 && text.length < 120) {
           continue;
         }
 
-        blocker.style.pointerEvents = 'none';
-        count += 1;
+        disableElement(blocker);
       }
 
-      return count;
+      for (const [x, y] of points) {
+        const target = document.elementFromPoint(x, y);
+        if (!target || target === composer || composer?.contains(target)) {
+          continue;
+        }
+
+        const blocker = target.closest('[data-base-ui-portal], [data-radix-portal], [role="presentation"], [data-base-ui-inert]');
+        if (blocker && !composer?.contains(blocker)) {
+          disableElement(blocker);
+        }
+      }
+
+      return disabled;
     });
+  } catch {
+    return 0;
+  }
+}
+
+async function closeTransientClaudeUi(page) {
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const disabledBlockers = await clearClaudePointerBlockers(page);
+      if (disabledBlockers > 0) {
+        console.warn('[Claude] Disabled stale Claude pointer blockers:', disabledBlockers);
+        return true;
+      }
+
+      if (!await hasTransientClaudeOverlay(page)) {
+        return false;
+      }
+
+      await page.keyboard.press('Escape');
+      await sleep(300);
+    }
+
+    const disabledBlockers = await clearClaudePointerBlockers(page);
 
     if (disabledBlockers > 0) {
       console.warn('[Claude] Disabled stale Claude overlay blockers:', disabledBlockers);
@@ -174,6 +246,10 @@ async function focusChatInput(page, input) {
   }
 
   await closeTransientClaudeUi(page);
+  const disabledBlockers = await clearClaudePointerBlockers(page);
+  if (disabledBlockers > 0) {
+    console.warn('[Claude] Cleared pointer blockers before forcing chat input click:', disabledBlockers);
+  }
   await input.click({ timeout: 6000, force: true });
 }
 
@@ -1076,10 +1152,39 @@ async function verifyChatName(page, chatName, timeoutMs = 5000) {
   try {
     await page.waitForFunction(
       (name) => {
-        const visibleText = document.body.innerText || '';
-        const titleText = document.title || '';
+        const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const isVisible = (element) => {
+          const rect = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
 
-        return visibleText.includes(name) || titleText.includes(name);
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0
+          );
+        };
+
+        const candidates = Array.from(document.querySelectorAll('header *, main *'))
+          .filter((element) => {
+            if (!isVisible(element)) {
+              return false;
+            }
+
+            const rect = element.getBoundingClientRect();
+
+            return (
+              rect.top >= 0 &&
+              rect.top <= 180 &&
+              rect.left >= 60 &&
+              rect.left <= 900
+            );
+          })
+          .map((element) => normalize(element.innerText || element.textContent))
+          .filter(Boolean);
+
+        return candidates.some((text) => text === name || text.includes(name));
       },
       expectedName,
       { timeout: timeoutMs }
@@ -1089,105 +1194,6 @@ async function verifyChatName(page, chatName, timeoutMs = 5000) {
   } catch {
     return false;
   }
-}
-
-async function renameChatViaApi(page, chatId, chatName) {
-  return page.evaluate(async function(payload) {
-    async function readResponseBody(response) {
-      try {
-        return (await response.text()).slice(0, 500);
-      } catch {
-        return '';
-      }
-    }
-
-    try {
-      var orgRes = await fetch('https://claude.ai/api/organizations', {
-        credentials: 'include'
-      });
-      var orgs = await orgRes.json();
-      var orgList = Array.isArray(orgs) ? orgs : [];
-      var attempts = [];
-
-      for (var orgIndex = 0; orgIndex < orgList.length; orgIndex += 1) {
-        var orgId = orgList[orgIndex]?.uuid;
-
-        if (!orgId) {
-          continue;
-        }
-
-        var baseUrl =
-          'https://claude.ai/api/organizations/' +
-          orgId +
-          '/chat_conversations/' +
-          payload.chatId;
-        var urls = [
-          baseUrl,
-          baseUrl + '/title',
-          baseUrl + '/name',
-        ];
-
-        var requestVariants = [
-          { method: 'PUT', body: { name: payload.chatName } },
-          { method: 'PATCH', body: { name: payload.chatName } },
-          { method: 'POST', body: { name: payload.chatName } },
-          { method: 'PUT', body: { title: payload.chatName } },
-          { method: 'PATCH', body: { title: payload.chatName } },
-          { method: 'POST', body: { title: payload.chatName } },
-          { method: 'PUT', body: { conversation: { name: payload.chatName } } },
-          { method: 'PATCH', body: { conversation: { name: payload.chatName } } },
-        ];
-
-        for (var urlIndex = 0; urlIndex < urls.length; urlIndex += 1) {
-          var url = urls[urlIndex];
-
-          for (var variantIndex = 0; variantIndex < requestVariants.length; variantIndex += 1) {
-            var variant = requestVariants[variantIndex];
-            var res = await fetch(url, {
-              method: variant.method,
-              credentials: 'include',
-              headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-              },
-              body: JSON.stringify(variant.body)
-            });
-
-            var responseBody = await readResponseBody(res);
-            attempts.push({
-              orgId: orgId,
-              url: url.replace('https://claude.ai/api/organizations/' + orgId, '/api/organizations/{orgId}'),
-              method: variant.method,
-              bodyKeys: Object.keys(variant.body),
-              status: res.status,
-              ok: res.ok,
-              responseBody: responseBody,
-            });
-
-            if (res.ok) {
-              return {
-                success: true,
-                orgId: orgId,
-                url: url,
-                method: variant.method,
-                status: res.status,
-                responseBody: responseBody,
-                attempts: attempts,
-              };
-            }
-          }
-        }
-      }
-
-      return {
-        success: false,
-        error: 'No successful rename API response.',
-        attempts: attempts,
-      };
-    } catch (e) {
-      return { success: false, error: e.message, attempts: [] };
-    }
-  }, { chatId: chatId, chatName: chatName });
 }
 
 async function openChatTitleMenu(page) {
@@ -1422,6 +1428,7 @@ async function renameChatViaUi(page, chatName) {
   }
 
   await sleep(1500);
+  await closeTransientClaudeUi(page);
   return await verifyChatName(page, chatName, 5000);
 }
 
@@ -1437,45 +1444,16 @@ async function renameChat(page, chatName) {
     }
     var chatId = chatIdMatch[1];
 
-    var result = await renameChatViaApi(page, chatId, chatName);
-    var apiAccepted = false;
-
-    if (result.success) {
-      apiAccepted = true;
-      console.log(
-        '[Claude] Chat renamed successfully via API:',
-        result.method,
-        result.status
-      );
-
-      await sleep(1500);
-
-      if (await verifyChatName(page, chatName, 3000)) {
-        return true;
-      }
-
-      console.warn('[Claude] Rename API returned success but visible title was not updated.');
-    }
-
-    if (apiAccepted) {
-      console.warn('[Claude] Rename API accepted but visible title was not refreshed. Continuing without UI fallback.');
-      await closeTransientClaudeUi(page);
-      return true;
-    }
-
-    console.warn(
-      '[Claude] Rename API failed:',
-      result.error || JSON.stringify(result.attempts?.slice(-2))
-    );
-
     const uiRenamed = await renameChatViaUi(page, chatName);
     await closeTransientClaudeUi(page);
 
     if (uiRenamed) {
-      console.log('[Claude] Chat renamed successfully via UI fallback.');
+      console.log('[Claude] Chat renamed successfully via UI.');
+      return true;
     }
 
-    return uiRenamed;
+    console.warn('[Claude] UI rename did not verify the visible title.');
+    return false;
   } catch (error) {
     console.warn('[Claude] renameChat failed:', error.message);
     await closeTransientClaudeUi(page);
@@ -1990,6 +1968,70 @@ async function findContinueGeneratingButton(page) {
     page.locator('button, [role="button"]').filter({ hasText: /^Continue(?: generating| response)?$/i }),
     page.getByText(/Continue generating|Continue response/i),
   ]);
+}
+
+async function detectClaudeConnectionError(page) {
+  try {
+    return await page.evaluate((patterns) => {
+      const regexes = patterns.map((pattern) => new RegExp(pattern.source, pattern.flags));
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const isVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          Number(style.opacity || 1) > 0
+        );
+      };
+
+      const selectors = [
+        '[role="alert"]',
+        '[role="status"]',
+        '[aria-live]',
+        '[data-testid*="toast" i]',
+        '[data-testid*="notification" i]',
+        '[class*="toast" i]',
+        '[class*="notification" i]',
+        '[class*="error" i]',
+      ];
+      const elements = Array.from(document.querySelectorAll(selectors.join(',')));
+      const visibleMessages = elements
+        .filter((element) => isVisible(element))
+        .map((element) => normalize(element.innerText || element.textContent))
+        .filter(Boolean);
+
+      const bodyText = normalize(document.body?.innerText || '');
+      if (bodyText.length < 20000) {
+        visibleMessages.push(bodyText);
+      }
+
+      for (const message of visibleMessages) {
+        for (const regex of regexes) {
+          const match = message.match(regex);
+          if (match) {
+            const start = Math.max(0, match.index - 80);
+            const end = Math.min(message.length, match.index + match[0].length + 120);
+            return message.slice(start, end).trim();
+          }
+        }
+      }
+
+      return '';
+    }, CLAUDE_CONNECTION_ERROR_PATTERNS.map((pattern) => ({
+      source: pattern.source,
+      flags: pattern.flags,
+    })));
+  } catch {
+    return '';
+  }
 }
 
 async function extractLatestResponseText(page) {
@@ -3290,6 +3332,10 @@ function createResponseTooShortError({ stepNumber, minResponseChars, actualLengt
   return error;
 }
 
+function canAcceptShortStableResponse(stepNumber) {
+  return true;
+}
+
 async function waitForResponse(page, responseBaseline = null, options = {}) {
   console.log('[Claude] Waiting for response (message-scoped mode)...');
 
@@ -3552,6 +3598,29 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
 
   while (elapsed < maxWait) {
     try {
+      const connectionErrorMessage = await detectClaudeConnectionError(page);
+      if (connectionErrorMessage) {
+        throw createClaudeConnectionError(connectionErrorMessage);
+      }
+
+      const immediateRetryButton = await findRetryButton(page);
+      if (immediateRetryButton) {
+        if (retryCount >= MAX_RESPONSE_RETRIES) {
+          throw createClaudeConnectionError(
+            `Claude đang hiện nút Try again/Retry sau ${retryCount} lần thử lại.`
+          );
+        }
+
+        console.log('[Claude] Try again/Retry button is visible. Clicking retry... attempt', retryCount + 1);
+        await clickIfVisible(immediateRetryButton);
+        retryCount += 1;
+        await sleep(5000);
+        stableCount = 0;
+        lastNewText = '';
+        elapsed += 5000;
+        continue;
+      }
+
       const controlState = await getGenerationControlState(page);
 
       if (controlState.stopVisible) {
@@ -3638,6 +3707,14 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
       }
 
       if (stableCount >= 3 && hasStableButTooShortText) {
+        if (!canAcceptShortStableResponse(stepNumber)) {
+          throw createResponseTooShortError({
+            stepNumber,
+            minResponseChars,
+            actualLength: lastNewText.length,
+          });
+        }
+
         console.warn(
           '[Claude] Stable response is shorter than the preferred minimum. Continuing anyway. Length:',
           lastNewText.length,
@@ -3647,27 +3724,11 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
         return lastNewText;
       }
 
-      const shouldTryRetry =
-        retryCount < MAX_RESPONSE_RETRIES &&
-        elapsed >= 45000 &&
-        lastNewText.length < MIN_PARTIAL_RESPONSE_CHARS;
-
-      if (shouldTryRetry) {
-        const retryButton = await findRetryButton(page);
-
-        if (retryButton) {
-          console.log('[Claude] Clicking retry... attempt', retryCount + 1);
-          await clickIfVisible(retryButton);
-          retryCount += 1;
-          await sleep(5000);
-          stableCount = 0;
-          lastNewText = '';
-          elapsed += 5000;
-          continue;
-        }
-      }
     } catch (error) {
-      if (error?.code === 'CLAUDE_RESPONSE_TOO_SHORT') {
+      if (
+        error?.code === 'CLAUDE_RESPONSE_TOO_SHORT' ||
+        error?.code === 'CLAUDE_CONNECTION_ERROR'
+      ) {
         throw error;
       }
 

@@ -7,6 +7,20 @@ function formatTimestamp(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}`
 }
 
+function getSafeFileName(name) {
+  const safeName = String(name || '')
+    .trim()
+    .replace(/[<>:"/\\|?*]/g, '-')
+    .split('')
+    .map((character) => (character.charCodeAt(0) < 32 ? '-' : character))
+    .join('')
+    .replace(/\s+/g, ' ')
+    .replace(/[. ]+$/g, '')
+    .slice(0, 120)
+
+  return safeName || `final_script_${formatTimestamp(new Date())}`
+}
+
 function getStep(steps, stepNumber) {
   return steps.find((step) => Number(step.stepNumber) === stepNumber)
 }
@@ -95,13 +109,13 @@ function getExportContent(steps) {
   return steps
     .map(
       (step) =>
-        `===== STEP ${step.stepNumber}: ${step.stepName} =====\n${step.result}`
+        `===== BƯỚC ${step.stepNumber}: ${step.stepName} =====\n${step.result}`
     )
     .join('\n\n')
     .trim()
 }
 
-function ExportButton({ steps }) {
+function ExportButton({ steps, chatName }) {
   const handleExport = () => {
     const content = getExportContent(steps)
 
@@ -109,7 +123,7 @@ function ExportButton({ steps }) {
     const url = URL.createObjectURL(file)
     const link = document.createElement('a')
     link.href = url
-    link.download = `final_script_${formatTimestamp(new Date())}.txt`
+    link.download = `${getSafeFileName(chatName)}.txt`
     link.click()
     URL.revokeObjectURL(url)
   }
@@ -117,7 +131,7 @@ function ExportButton({ steps }) {
   return (
     <button type="button" className={styles.button} onClick={handleExport}>
       <Download size={18} />
-      <span>Export Final Script</span>
+      <span>Xuất kịch bản hoàn chỉnh</span>
     </button>
   )
 }

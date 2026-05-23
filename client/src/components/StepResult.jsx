@@ -28,14 +28,14 @@ function StepResult({ stepNumber, stepName, result }) {
     <article className={styles.card}>
       <header className={styles.header}>
         <div>
-          <p className={styles.eyebrow}>Step {stepNumber}</p>
+          <p className={styles.eyebrow}>Bước {stepNumber}</p>
           <h3>{stepName}</h3>
         </div>
 
         <div className={styles.actions}>
           <button type="button" className={styles.iconButton} onClick={handleCopy}>
             {copied ? <CheckCheck size={16} /> : <Copy size={16} />}
-            <span>{copied ? 'Copied' : 'Copy'}</span>
+            <span>{copied ? 'Đã copy' : 'Copy'}</span>
           </button>
 
           <button
@@ -44,7 +44,7 @@ function StepResult({ stepNumber, stepName, result }) {
             onClick={() => setExpanded((value) => !value)}
           >
             {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-            <span>{expanded ? 'Collapse' : 'Expand'}</span>
+            <span>{expanded ? 'Thu gọn' : 'Mở rộng'}</span>
           </button>
         </div>
       </header>
@@ -54,8 +54,8 @@ function StepResult({ stepNumber, stepName, result }) {
       </pre>
 
       <footer className={styles.footer}>
-        <span>{wordCount} words</span>
-        {!expanded && result.split('\n').length > 3 && <span>Preview 3 dòng</span>}
+        <span>{wordCount} từ</span>
+        {!expanded && result.split('\n').length > 3 && <span>Xem trước 3 dòng</span>}
       </footer>
     </article>
   )

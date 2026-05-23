@@ -23,7 +23,7 @@ function isProfileAlreadyOpenError(error) {
 function toFriendlyBrowserLaunchError(error) {
   if (isProfileAlreadyOpenError(error)) {
     const friendlyError = new Error(
-      'Chromium automation profile is already open or locked. Close the old automation Chromium window, then click Connect Browser again.'
+      'Profile Chromium automation đang mở hoặc bị khóa. Hãy đóng cửa sổ Chromium cũ rồi bấm Kết nối browser lại.'
     );
     friendlyError.code = 'BROWSER_PROFILE_LOCKED';
     friendlyError.cause = error;
@@ -119,8 +119,7 @@ async function selectAutomationPage(context) {
 }
 
 async function launchBrowser(options = {}) {
-  const { recoverProfileLock = true } = options;
-  const userDataDir = BROWSER_USER_DATA_DIR;
+  const { recoverProfileLock = true, userDataDir = BROWSER_USER_DATA_DIR } = options;
   let context;
 
   if (recoverProfileLock) {

@@ -10,18 +10,18 @@ const PROMPT_STEPS = [
   { stepNumber: 1, name: 'Phân tích kịch bản gốc' },
   { stepNumber: 2, name: 'Viết outline 3 phần' },
   { stepNumber: 3, name: 'Đánh giá và cải thiện outline' },
-  { stepNumber: 4, name: 'Viết Part 1' },
-  { stepNumber: 5, name: 'Viết Part 2' },
-  { stepNumber: 6, name: 'Viết Part 3' },
+  { stepNumber: 4, name: 'Bước 5: Viết Part 1' },
+  { stepNumber: 5, name: 'Bước 6: Viết Part 2' },
+  { stepNumber: 6, name: 'Bước 7: Viết Part 3' },
   { stepNumber: 7, name: 'Bước 7a: Ghép và kiểm tra' },
-  { stepNumber: 8, name: 'Bước 7b: Sửa và tạo file hoàn chỉnh' },
+  { stepNumber: 8, name: 'Bước 8: Sửa và tạo file hoàn chỉnh' },
 ]
 
 const sectionClass =
   'rounded-2xl border border-[#2d3148] bg-[#1a1a2e] p-5 shadow-2xl shadow-black/25 transition duration-200'
 
 const fieldClass =
-  'mt-3 w-full rounded-xl border border-[#3a3f5f] bg-[#10101d] p-3 text-white outline-none transition duration-200 placeholder:text-gray-500 focus:border-[#00d4aa] focus:shadow-[0_0_15px_rgba(0,212,170,0.12)] focus:ring-0'
+  'mt-3 w-full rounded-xl border border-[#5d527b] bg-[#171227] p-3 text-white outline-none transition duration-200 placeholder:text-gray-500 focus:border-[#c4a1ff] focus:shadow-[0_0_15px_rgba(196,161,255,0.18)] focus:ring-0'
 
 function ConfigPanel({ projects, onStart }) {
   const [projectUrl, setProjectUrl] = useState('')
@@ -32,12 +32,19 @@ function ConfigPanel({ projects, onStart }) {
   const [originalScript, setOriginalScript] = useState('')
   const [activePromptStep, setActivePromptStep] = useState(1)
   const [stepPromptOverrides, setStepPromptOverrides] = useState({})
-  const [promptTemplates, setPromptTemplates] = useState(PROMPT_STEPS)
+  const [basePromptTemplates, setBasePromptTemplates] = useState(PROMPT_STEPS)
+  const [customPromptSteps, setCustomPromptSteps] = useState([])
 
+  const promptTemplates = [...basePromptTemplates, ...customPromptSteps]
   const effectiveProjectUrl = projectUrl || (projects.length === 1 ? projects[0].url : '')
-  const isDisabled = !effectiveProjectUrl || !originalScript.trim()
-  const activePromptTemplate =
-    promptTemplates.find((step) => step.stepNumber === activePromptStep)?.prompt || ''
+  const hasInvalidCustomStep = customPromptSteps.some((step) => {
+    const promptValue = stepPromptOverrides[step.stepNumber] ?? step.prompt ?? ''
+    return !step.name.trim() || !String(promptValue).trim()
+  })
+  const isDisabled = !effectiveProjectUrl || !originalScript.trim() || hasInvalidCustomStep
+  const activePrompt = promptTemplates.find((step) => step.stepNumber === activePromptStep)
+  const isActiveCustomStep = Boolean(activePrompt?.custom)
+  const activePromptTemplate = activePrompt?.prompt || ''
   const activePromptValue = Object.prototype.hasOwnProperty.call(stepPromptOverrides, activePromptStep)
     ? stepPromptOverrides[activePromptStep]
     : activePromptTemplate
@@ -49,11 +56,11 @@ function ConfigPanel({ projects, onStart }) {
       .then((response) => response.json())
       .then((payload) => {
         if (!cancelled && Array.isArray(payload?.steps)) {
-          setPromptTemplates(payload.steps)
+          setBasePromptTemplates(payload.steps)
         }
       })
       .catch(() => {
-        // Backend may be offline while editing UI. Keep fallback step names.
+        // Backend có thể đang tắt khi chỉnh UI. Giữ tên bước fallback.
       })
 
     return () => {
@@ -66,16 +73,25 @@ function ConfigPanel({ projects, onStart }) {
       return
     }
 
+    const sanitizedCustomSteps = customPromptSteps
+      .map((step) => ({
+        stepNumber: step.stepNumber,
+        name: step.name.trim(),
+        prompt: String(stepPromptOverrides[step.stepNumber] ?? step.prompt ?? '').trim(),
+      }))
+      .filter((step) => step.name && step.prompt)
+
     onStart({
       originalScript: originalScript.trim(),
       projectUrl: effectiveProjectUrl,
       modelName,
       adaptiveThinking,
-      chatName: chatName.trim() || 'ScriptForge Session',
+      chatName: chatName.trim() || 'Phiên ScriptForge',
       semiAuto,
       stepPromptOverrides: Object.fromEntries(
         Object.entries(stepPromptOverrides).filter(([, value]) => value.trim())
       ),
+      customPromptSteps: sanitizedCustomSteps,
     })
   }
 
@@ -86,13 +102,56 @@ function ConfigPanel({ projects, onStart }) {
     }))
   }
 
+  const handleAddStep = () => {
+    const nextStepNumber = Math.max(...promptTemplates.map((step) => step.stepNumber), 0) + 1
+    const newStep = {
+      stepNumber: nextStepNumber,
+      name: `Bước tùy chỉnh ${nextStepNumber}`,
+      prompt: '',
+      custom: true,
+    }
+
+    setCustomPromptSteps((previous) => [...previous, newStep])
+    setStepPromptOverrides((previous) => ({
+      ...previous,
+      [nextStepNumber]: '',
+    }))
+    setActivePromptStep(nextStepNumber)
+  }
+
+  const handleCustomStepNameChange = (value) => {
+    setCustomPromptSteps((previous) =>
+      previous.map((step) =>
+        step.stepNumber === activePromptStep
+          ? {
+              ...step,
+              name: value,
+            }
+          : step
+      )
+    )
+  }
+
+  const handleRemoveCustomStep = () => {
+    const nextCustomSteps = customPromptSteps.filter(
+      (step) => step.stepNumber !== activePromptStep
+    )
+    setCustomPromptSteps(nextCustomSteps)
+    setStepPromptOverrides((previous) => {
+      const next = { ...previous }
+      delete next[activePromptStep]
+      return next
+    })
+    setActivePromptStep(promptTemplates[0]?.stepNumber || 1)
+  }
+
   return (
     <section className="mx-auto flex max-w-2xl flex-col gap-6 p-8">
       <div className={sectionClass}>
         <div>
-          <h2 className="text-lg font-bold text-white">Project Selection</h2>
+          <h2 className="text-lg font-bold text-white">Chọn project</h2>
           <p className="text-sm text-gray-400">
-            Chon Claude project noi pipeline se chay.
+            Chọn Claude project nơi pipeline sẽ chạy.
           </p>
         </div>
 
@@ -101,11 +160,11 @@ function ConfigPanel({ projects, onStart }) {
           value={effectiveProjectUrl}
           onChange={(event) => setProjectUrl(event.target.value)}
         >
-          <option value="" disabled className="bg-[#10101d] text-white">
-            Chon project...
+          <option value="" disabled className="bg-[#171227] text-white">
+            Chọn project...
           </option>
           {projects.map((project) => (
-            <option key={project.url} value={project.url} className="bg-[#10101d] text-white">
+            <option key={project.url} value={project.url} className="bg-[#171227] text-white">
               {project.name}
             </option>
           ))}
@@ -114,9 +173,9 @@ function ConfigPanel({ projects, onStart }) {
 
       <div className={sectionClass}>
         <div>
-          <h2 className="text-lg font-bold text-white">Model Selection</h2>
+          <h2 className="text-lg font-bold text-white">Chọn model</h2>
           <p className="text-sm text-gray-400">
-            Chon model phu hop truoc khi gui prompt dau tien.
+            Chọn model phù hợp trước khi gửi prompt đầu tiên.
           </p>
         </div>
 
@@ -131,8 +190,8 @@ function ConfigPanel({ projects, onStart }) {
                 onClick={() => setModelName(option)}
                 className={`flex-1 cursor-pointer rounded-xl border p-3 transition duration-200 hover:scale-[1.02] ${
                   active
-                    ? 'border-[#00d4aa] bg-[#00d4aa]/15 text-[#00d4aa] shadow-[0_0_18px_rgba(0,212,170,0.18)]'
-                    : 'border-[#3a3f5f] bg-[#10101d] text-gray-300'
+                    ? 'border-[#c4a1ff] bg-[#c4a1ff]/15 text-[#c4a1ff] shadow-[0_0_18px_rgba(196,161,255,0.24)]'
+                    : 'border-[#5d527b] bg-[#171227] text-gray-300'
                 }`}
               >
                 {option}
@@ -146,7 +205,7 @@ function ConfigPanel({ projects, onStart }) {
         <div>
           <h2 className="text-lg font-bold text-white">Adaptive Thinking</h2>
           <p className="text-sm text-gray-400">
-            Chon Claude co bat che do Adaptive thinking trong model menu hay khong.
+            Chọn Claude có bật chế độ Adaptive Thinking trong menu model hay không.
           </p>
         </div>
 
@@ -156,31 +215,31 @@ function ConfigPanel({ projects, onStart }) {
             onClick={() => setAdaptiveThinking(true)}
             className={`flex-1 cursor-pointer rounded-xl border p-3 transition duration-200 hover:scale-[1.02] ${
               adaptiveThinking
-                ? 'border-[#00d4aa] bg-[#00d4aa]/15 text-[#00d4aa] shadow-[0_0_18px_rgba(0,212,170,0.18)]'
-                : 'border-[#3a3f5f] bg-[#10101d] text-gray-300'
+                ? 'border-[#c4a1ff] bg-[#c4a1ff]/15 text-[#c4a1ff] shadow-[0_0_18px_rgba(196,161,255,0.24)]'
+                : 'border-[#5d527b] bg-[#171227] text-gray-300'
             }`}
           >
-            On
+            Bật
           </button>
           <button
             type="button"
             onClick={() => setAdaptiveThinking(false)}
             className={`flex-1 cursor-pointer rounded-xl border p-3 transition duration-200 hover:scale-[1.02] ${
               !adaptiveThinking
-                ? 'border-[#00d4aa] bg-[#00d4aa]/15 text-[#00d4aa] shadow-[0_0_18px_rgba(0,212,170,0.18)]'
-                : 'border-[#3a3f5f] bg-[#10101d] text-gray-300'
+                ? 'border-[#c4a1ff] bg-[#c4a1ff]/15 text-[#c4a1ff] shadow-[0_0_18px_rgba(196,161,255,0.24)]'
+                : 'border-[#5d527b] bg-[#171227] text-gray-300'
             }`}
           >
-            Off
+            Tắt
           </button>
         </div>
       </div>
 
       <div className={sectionClass}>
         <div>
-          <h2 className="text-lg font-bold text-white">Chat Name</h2>
+          <h2 className="text-lg font-bold text-white">Tên đoạn chat</h2>
           <p className="text-sm text-gray-400">
-            Dat ten cho cuoc chat moi trong project da chon.
+            Đặt tên cho cuộc chat mới trong project đã chọn.
           </p>
         </div>
 
@@ -189,15 +248,15 @@ function ConfigPanel({ projects, onStart }) {
           type="text"
           value={chatName}
           onChange={(event) => setChatName(event.target.value)}
-          placeholder="Nhap ten cho doan chat..."
+          placeholder="Nhập tên cho đoạn chat..."
         />
       </div>
 
       <div className={sectionClass}>
         <div>
-          <h2 className="text-lg font-bold text-white">Pipeline Mode</h2>
+          <h2 className="text-lg font-bold text-white">Chế độ pipeline</h2>
           <p className="text-sm text-gray-400">
-            Semi-Auto dung sau moi buoc de ban review va chinh sua. Auto chay lien tuc 8 buoc.
+            Semi-Auto dừng sau mỗi bước để bạn kiểm tra và chỉnh sửa. Auto chạy liên tục toàn bộ bước.
           </p>
         </div>
 
@@ -207,8 +266,8 @@ function ConfigPanel({ projects, onStart }) {
             onClick={() => setSemiAuto(false)}
             className={`flex-1 cursor-pointer rounded-xl border p-3 transition duration-200 hover:scale-[1.02] ${
               !semiAuto
-                ? 'border-[#00d4aa] bg-[#00d4aa]/15 text-[#00d4aa] shadow-[0_0_18px_rgba(0,212,170,0.18)]'
-                : 'border-[#3a3f5f] bg-[#10101d] text-gray-300'
+                ? 'border-[#c4a1ff] bg-[#c4a1ff]/15 text-[#c4a1ff] shadow-[0_0_18px_rgba(196,161,255,0.24)]'
+                : 'border-[#5d527b] bg-[#171227] text-gray-300'
             }`}
           >
             Auto
@@ -218,8 +277,8 @@ function ConfigPanel({ projects, onStart }) {
             onClick={() => setSemiAuto(true)}
             className={`flex-1 cursor-pointer rounded-xl border p-3 transition duration-200 hover:scale-[1.02] ${
               semiAuto
-                ? 'border-[#00d4aa] bg-[#00d4aa]/15 text-[#00d4aa] shadow-[0_0_18px_rgba(0,212,170,0.18)]'
-                : 'border-[#3a3f5f] bg-[#10101d] text-gray-300'
+                ? 'border-[#c4a1ff] bg-[#c4a1ff]/15 text-[#c4a1ff] shadow-[0_0_18px_rgba(196,161,255,0.24)]'
+                : 'border-[#5d527b] bg-[#171227] text-gray-300'
             }`}
           >
             Semi-Auto
@@ -229,11 +288,20 @@ function ConfigPanel({ projects, onStart }) {
 
       <div className={sectionClass}>
         <div>
-          <h2 className="text-lg font-bold text-white">Prompt Overrides</h2>
+          <h2 className="text-lg font-bold text-white">Cấu hình prompt từng bước</h2>
           <p className="text-sm text-gray-400">
-            Tuy chon: sua prompt cua tung buoc truoc khi chay. De trong thi dung prompt mac dinh.
-            Neu can chen kich ban goc vao custom prompt, dat {'{{originalScript}}'} dung vi tri ban muon.
+            Có thể sửa prompt mặc định hoặc thêm bước mới trước khi chạy. Nếu cần chèn kịch bản gốc vào prompt tùy chỉnh, đặt {'{{originalScript}}'} đúng vị trí bạn muốn.
           </p>
+        </div>
+
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={handleAddStep}
+            className="rounded-lg border border-[#c4a1ff]/40 bg-[#c4a1ff]/10 px-3 py-2 text-xs font-bold text-[#c4a1ff] transition hover:bg-[#c4a1ff]/15"
+          >
+            + Thêm bước
+          </button>
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -248,46 +316,68 @@ function ConfigPanel({ projects, onStart }) {
                 onClick={() => setActivePromptStep(step.stepNumber)}
                 className={`rounded-lg border p-2 text-left text-xs transition ${
                   active
-                    ? 'border-[#00d4aa] bg-[#00d4aa]/15 text-[#00d4aa]'
-                    : 'border-[#3a3f5f] bg-[#10101d] text-gray-300 hover:border-[#00d4aa]/50'
+                    ? 'border-[#c4a1ff] bg-[#c4a1ff]/15 text-[#c4a1ff]'
+                    : 'border-[#5d527b] bg-[#171227] text-gray-300 hover:border-[#c4a1ff]/50'
                 }`}
               >
-                <span className="block font-bold">Step {step.stepNumber}</span>
+                <span className="block font-bold">Bước {step.stepNumber}</span>
                 <span className="line-clamp-1">{step.name}</span>
-                {hasOverride && <span className="mt-1 block text-[10px] text-[#00d4aa]">custom</span>}
+                {step.custom && <span className="mt-1 block text-[10px] text-[#eab308]">thêm mới</span>}
+                {hasOverride && <span className="mt-1 block text-[10px] text-[#c4a1ff]">đã sửa</span>}
               </button>
             )
           })}
         </div>
 
+        {isActiveCustomStep && (
+          <input
+            className={fieldClass}
+            type="text"
+            value={activePrompt?.name || ''}
+            onChange={(event) => handleCustomStepNameChange(event.target.value)}
+            placeholder="Tên bước tùy chỉnh..."
+          />
+        )}
+
         <textarea
           className={`${fieldClass} min-h-[160px] resize-y font-mono text-sm`}
           value={activePromptValue}
           onChange={(event) => handlePromptOverrideChange(event.target.value)}
-          placeholder={`Prompt cho Step ${activePromptStep}. Xoa rong de quay ve mac dinh.`}
+          placeholder={`Prompt cho bước ${activePromptStep}. ${isActiveCustomStep ? 'Nhập nội dung prompt bắt buộc.' : 'Xóa rỗng để quay về mặc định.'}`}
         />
         <div className="mt-2 flex gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              setStepPromptOverrides((previous) => {
-                const next = { ...previous }
-                delete next[activePromptStep]
-                return next
-              })
-            }}
-            className="rounded-lg border border-[#3a3f5f] bg-[#10101d] px-3 py-2 text-xs text-gray-300 transition hover:border-[#00d4aa]/50 hover:text-white"
-          >
-            Reset step nay ve mac dinh
-          </button>
+          {!isActiveCustomStep && (
+            <button
+              type="button"
+              onClick={() => {
+                setStepPromptOverrides((previous) => {
+                  const next = { ...previous }
+                  delete next[activePromptStep]
+                  return next
+                })
+              }}
+              className="rounded-lg border border-[#5d527b] bg-[#171227] px-3 py-2 text-xs text-gray-300 transition hover:border-[#c4a1ff]/50 hover:text-white"
+            >
+              Đặt lại bước này về mặc định
+            </button>
+          )}
+          {isActiveCustomStep && (
+            <button
+              type="button"
+              onClick={handleRemoveCustomStep}
+              className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300 transition hover:border-red-400 hover:text-red-200"
+            >
+              Xóa bước tùy chỉnh
+            </button>
+          )}
         </div>
       </div>
 
       <div className={sectionClass}>
         <div>
-          <h2 className="text-lg font-bold text-white">Script Input</h2>
+          <h2 className="text-lg font-bold text-white">Kịch bản gốc</h2>
           <p className="text-sm text-gray-400">
-            Paste toan bo kich ban goc de pipeline xu ly qua 8 buoc.
+            Dán toàn bộ kịch bản gốc để pipeline xử lý qua các bước đã cấu hình.
           </p>
         </div>
 
@@ -295,7 +385,7 @@ function ConfigPanel({ projects, onStart }) {
           className={`${fieldClass} min-h-[240px] resize-y`}
           value={originalScript}
           onChange={(event) => setOriginalScript(event.target.value)}
-          placeholder="Paste kich ban goc vao day..."
+          placeholder="Dán kịch bản gốc vào đây..."
         />
       </div>
 
@@ -304,12 +394,12 @@ function ConfigPanel({ projects, onStart }) {
         className={`w-full rounded-xl p-4 text-lg font-bold transition duration-200 ${
           isDisabled
             ? 'cursor-not-allowed bg-gray-700/70 text-gray-400'
-            : 'bg-gradient-to-r from-[#00d4aa] to-[#00b894] text-black shadow-[0_4px_20px_rgba(0,212,170,0.3)] hover:scale-[1.02] hover:brightness-110'
+            : 'bg-gradient-to-r from-[#f3e8ff] via-[#c4a1ff] to-[#9f7aea] text-[#2f174a] shadow-[0_4px_20px_rgba(196,161,255,0.34)] hover:scale-[1.02] hover:brightness-110'
         }`}
         disabled={isDisabled}
         onClick={handleSubmit}
       >
-        Start Pipeline
+        Bắt đầu pipeline
       </button>
     </section>
   )

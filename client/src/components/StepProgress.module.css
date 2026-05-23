@@ -1,10 +1,17 @@
 .panel {
   width: 250px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(222, 204, 255, 0.18);
   border-radius: 24px;
-  background: rgba(26, 26, 46, 0.92);
+  background: linear-gradient(155deg, rgba(72, 60, 104, 0.42), rgba(20, 16, 36, 0.62));
   padding: 1.25rem;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 24px 70px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(20px) saturate(1.18);
+  -webkit-backdrop-filter: blur(20px) saturate(1.18);
+}
+
+.horizontal {
+  width: 100%;
+  padding: 1rem;
 }
 
 .titleWrap h2 {
@@ -15,7 +22,7 @@
 
 .eyebrow {
   margin: 0;
-  color: #00d4aa;
+  color: #c4a1ff;
   text-transform: uppercase;
   letter-spacing: 0.2em;
   font-size: 0.72rem;
@@ -29,6 +36,13 @@
   position: relative;
 }
 
+.horizontal .list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}
+
 .list::before {
   content: '';
   position: absolute;
@@ -38,6 +52,10 @@
   width: 2px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
+}
+
+.horizontal .list::before {
+  display: none;
 }
 
 .item {
@@ -53,13 +71,29 @@
   transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
 }
 
+.horizontal .item {
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 0.55rem;
+  min-height: 74px;
+  border-left: 0;
+  border-top: 3px solid rgba(222, 204, 255, 0.16);
+  background: rgba(255, 255, 255, 0.055);
+  padding: 0.6rem;
+}
+
 .item:hover {
   background: rgba(255, 255, 255, 0.05);
 }
 
 .item:has(.running) {
-  border-left-color: #00d4aa;
-  background: rgba(0, 212, 170, 0.05);
+  border-left-color: #c4a1ff;
+  background: rgba(196, 161, 255, 0.08);
+}
+
+.horizontal .item:has(.running) {
+  border-left-color: transparent;
+  border-top-color: #c4a1ff;
+  background: rgba(196, 161, 255, 0.12);
 }
 
 .marker {
@@ -71,12 +105,27 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(222, 204, 255, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.horizontal .marker {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
 }
 
 .content strong {
   display: block;
   line-height: 1.45;
+}
+
+.horizontal .content strong {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .stepNumber {
@@ -94,15 +143,15 @@
 }
 
 .running {
-  background: rgba(0, 212, 170, 0.16);
-  color: #00d4aa;
-  box-shadow: 0 0 0 8px rgba(0, 212, 170, 0.05), 0 0 16px rgba(0, 212, 170, 0.18);
+  background: rgba(196, 161, 255, 0.2);
+  color: #c4a1ff;
+  box-shadow: 0 0 0 8px rgba(196, 161, 255, 0.08), 0 0 16px rgba(196, 161, 255, 0.22);
 }
 
 .done {
-  background: rgba(0, 212, 170, 0.16);
-  color: #00d4aa;
-  box-shadow: 0 0 6px #00d4aa;
+  background: rgba(196, 161, 255, 0.2);
+  color: #c4a1ff;
+  box-shadow: 0 0 6px #c4a1ff;
 }
 
 .error {
@@ -133,5 +182,9 @@
 @media (max-width: 980px) {
   .panel {
     width: auto;
+  }
+
+  .horizontal .list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

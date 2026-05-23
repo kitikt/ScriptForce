@@ -14,7 +14,7 @@ function createClaudeWebProvider(page) {
 
     ensureAvailable() {
       if (!page || typeof page.isClosed !== 'function' || page.isClosed()) {
-        throw new Error('Browser page is closed. Please reconnect the browser.');
+        throw new Error('Trang browser đã đóng. Vui lòng kết nối lại browser.');
       }
     },
 
@@ -36,6 +36,14 @@ function createClaudeWebProvider(page) {
 
     async renameChat(chatName) {
       return renameChat(page, chatName);
+    },
+
+    async recoverAfterStepError() {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('div[contenteditable="true"]')),
+        { timeout: 30000 }
+      );
     },
 
     async sendPrompt(prompt, options = {}) {

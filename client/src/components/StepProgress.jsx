@@ -18,12 +18,12 @@ function getStepState(stepNumber, completedSteps, currentStep, errorStep) {
   return 'waiting'
 }
 
-function StepProgress({ steps, completedSteps, currentStep, errorStep }) {
+function StepProgress({ steps, completedSteps, currentStep, errorStep, variant = 'vertical' }) {
   return (
-    <aside className={styles.panel}>
+    <aside className={`${styles.panel} ${variant === 'horizontal' ? styles.horizontal : ''}`}>
       <div className={styles.titleWrap}>
-        <p className={styles.eyebrow}>Pipeline</p>
-        <h2>8 bước xử lý</h2>
+        <p className={styles.eyebrow}>Tiến trình</p>
+        <h2>{steps.length} bước xử lý</h2>
       </div>
 
       <div className={styles.list}>
@@ -44,7 +44,7 @@ function StepProgress({ steps, completedSteps, currentStep, errorStep }) {
                 {state === 'running' && <span className={styles.pulseDot} />}
               </div>
               <div className={styles.content}>
-                <span className={styles.stepNumber}>Step {step.stepNumber}</span>
+                <span className={styles.stepNumber}>Bước {step.stepNumber}</span>
                 <strong>{step.name}</strong>
               </div>
             </div>
