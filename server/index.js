@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const path = require('path');
 const { randomUUID } = require('crypto');
 const { EventEmitter } = require('events');
 const { Server } = require('socket.io');
@@ -22,6 +23,7 @@ const { STEPS } = require('./prompts/templates');
 
 const PORT = Number(process.env.PORT || 3001);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+const CLIENT_DIST_DIR = process.env.CLIENT_DIST_DIR || '';
 const MAX_ACTIVE_PIPELINES = 2;
 const USAGE_POLL_INTERVAL_MS = 30000;
 
@@ -510,6 +512,13 @@ app.get('/prompt-templates', (_req, res) => {
     })),
   });
 });
+
+if (CLIENT_DIST_DIR) {
+  app.use(express.static(CLIENT_DIST_DIR));
+  app.get(/.*/, (_req, res) => {
+    res.sendFile(path.join(CLIENT_DIST_DIR, 'index.html'));
+  });
+}
 
 io.on('connection', (socket) => {
   console.log('Client connected');

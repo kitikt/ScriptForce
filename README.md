@@ -1,22 +1,31 @@
 # ScriptForge
-Tool tự động hóa viết kịch bản YouTube storytelling trên Claude.ai bằng browser automation.
 
-## Vấn đề giải quyết
-Viết kịch bản thủ công thường mất 1-2 tiếng vì phải copy paste prompt qua lại, chờ Claude trả lời, rồi gửi tiếp prompt kế tiếp.
-ScriptForge thay thế luồng lặp đó bằng một pipeline tự động.
-Bạn paste kịch bản gốc, bấm 1 nút, rồi có thể đi làm việc khác trong lúc tool chạy.
+ScriptForge là app tự động hóa workflow viết kịch bản YouTube storytelling trên Claude.ai.
+App mở trình duyệt Claude, giữ phiên đăng nhập, gửi prompt theo từng bước, chờ Claude trả lời và hiển thị tiến trình ngay trong giao diện.
 
-## Cách hoạt động
-ScriptForge dùng Playwright để điều khiển Chromium, tự vào Claude.ai, tự gửi 8 prompt tuần tự, tự chờ response, rồi trả trạng thái và kết quả về web app qua WebSocket.
-Phiên đăng nhập được lưu trong profile Chromium để lần sau không cần login lại nếu session còn hiệu lực.
+## Tải Bản Windows
 
-## Cài đặt nhanh
+[![Tải ScriptForge cho Windows](https://img.shields.io/badge/T%E1%BA%A3i%20ScriptForge-Windows%20Portable-8b5cf6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/kitikt/ScriptForce/releases/latest)
+
+Với người dùng không biết Git, Node.js hoặc CMD:
+
+1. Vào trang Releases bằng nút tải ở trên.
+2. Tải file zip Windows portable mới nhất.
+3. Giải nén file zip.
+4. Mở `ScriptForge.exe`.
+5. Bấm `Kết nối trình duyệt`.
+6. Đăng nhập Claude.ai, chọn project và chạy pipeline.
+
+Lưu ý: khi phát hành cho người dùng, hãy zip nguyên thư mục `ScriptForge-win32-x64`, không chỉ gửi riêng file `ScriptForge.exe`.
+
+## Dành Cho Người Phát Triển
+
 Yêu cầu:
 
 - Node.js 18+
 - Tài khoản Claude.ai
 
-Clone project rồi chạy setup ở thư mục root:
+Cài đặt:
 
 ```bash
 git clone https://github.com/kitikt/ScriptForce.git
@@ -24,9 +33,7 @@ cd ScriptForce
 npm run setup
 ```
 
-Lệnh `npm run setup` sẽ tự cài dependency cho root, `client`, `server` và cài Chromium cho Playwright.
-
-Chạy project:
+Chạy bản dev:
 
 ```bash
 npm run dev
@@ -39,79 +46,65 @@ Client: http://localhost:5173
 Server: http://localhost:3001
 ```
 
-Nếu đã từng clone trước đó và chỉ muốn sửa lỗi thiếu `vite` / `express`, chạy lại từ root:
+## Build Windows Portable
+
+Tạo bản portable cho Windows:
 
 ```bash
-npm run setup
+npm run portable:win
 ```
 
-Hoặc cài từng phần thủ công:
+Kết quả nằm ở:
 
-```bash
-npm install
-npm --workspace client install
-npm --workspace server install
-npm run browsers:install
+```text
+release-portable-clean/ScriptForge-win32-x64/
 ```
 
-## Sử dụng
-1. Mở `http://localhost:5173`.
-2. Bấm `Connect Browser`.
-3. Lần đầu cần login Claude.ai trong cửa sổ Chromium được mở ra.
-4. Sau khi login xong, quay lại web app.
-5. Chọn project, model và chat name.
-6. Paste kịch bản gốc.
-7. Bấm `Start Pipeline`.
-8. Theo dõi tiến độ và kết quả trên giao diện.
+Mở app bằng:
 
-Lần sau ScriptForge tự nhớ phiên đăng nhập nếu session Claude.ai vẫn còn hiệu lực.
+```text
+release-portable-clean/ScriptForge-win32-x64/ScriptForge.exe
+```
 
-## Cấu trúc thư mục
+Trước khi build lại, hãy đóng mọi cửa sổ ScriptForge đang mở để tránh Windows khóa file.
+
+## Tính Năng Chính
+
+- Điều khiển Claude.ai qua browser thật.
+- Lưu phiên đăng nhập Claude để lần sau không cần login lại nếu session còn hiệu lực.
+- Hỗ trợ nhiều profile tài khoản Claude.
+- Chạy tối đa 2 pipeline song song.
+- Chọn project, model và trạng thái Adaptive Thinking.
+- Theo dõi log và tiến trình pipeline theo thời gian thực.
+- Kiểm tra usage Claude.
+- Tùy chỉnh, thêm, sửa step prompt.
+- Export kết quả ra file txt.
+- Bản Windows portable không cần Git, Node.js hoặc CMD cho người dùng cuối.
+
+## Cấu Trúc Dự Án
+
 ```text
 scriptforge/
-|-- README.md                  tài liệu dự án
-|-- package.json               script chạy chung
-|-- package-lock.json          lockfile root
-|-- client/                    web app React
-|   |-- src/                   mã nguồn frontend
-|   |-- src/components/        component giao diện
-|   |-- src/components/ui/     component UI nền
-|   |-- src/lib/               tiện ích frontend
-|   `-- package.json           dependency client
-`-- server/                    backend automation
-    |-- index.js               server Express và WebSocket
-    |-- automation/            logic điều khiển browser
-    |-- prompts/               template prompt
-    |-- browser-data/          profile Chromium đã login
-    `-- package.json           dependency server
+|-- client/                  React/Vite UI
+|-- server/                  Express, Socket.IO, Playwright automation
+|-- electron/                Desktop portable entry
+|-- scripts/                 Script build và cài browser local
+|-- docs/                    Tài liệu sử dụng/build
+|-- package.json             Script root
+`-- README.md
 ```
 
-## Tính năng
-- Điều khiển Chromium bằng Playwright
-- Kết nối Claude.ai qua browser thật
-- Lưu phiên đăng nhập trong browser profile
-- Gửi 8 prompt theo thứ tự cố định
-- Chờ Claude trả lời trước khi chạy bước tiếp theo
-- Hiển thị trạng thái pipeline theo thời gian thực
-- Gửi log từ server về client qua WebSocket
-- Hiển thị kết quả từng bước trong web app
-- Hỗ trợ cấu hình project, model và chat name
-- Tách frontend và backend rõ ràng
+## Ghi Chú Phát Hành
 
-## Roadmap
-- [x] Web app điều khiển pipeline
-- [x] Backend Express
-- [x] WebSocket realtime
-- [x] Playwright Chromium automation
-- [x] Lưu browser session
-- [x] Pipeline 8 prompt
-- [x] Hiển thị log và trạng thái từng bước
-- [ ] Export kết quả ra file
-- [ ] Quản lý nhiều bộ prompt
-- [ ] Tùy chỉnh số bước pipeline
-- [ ] Hàng đợi nhiều kịch bản
-- [ ] Retry khi Claude trả lời lỗi hoặc timeout
-- [ ] Đóng gói chạy production
+Để nút tải Windows hoạt động đúng cho người dùng cuối:
+
+1. Chạy `npm run portable:win`.
+2. Zip thư mục `release-portable-clean/ScriptForge-win32-x64`.
+3. Tạo GitHub Release mới.
+4. Upload file zip vào Release đó.
+
+Sau khi có Release, nút tải trong README sẽ đưa người dùng đến bản mới nhất.
 
 ## License
+
 MIT

@@ -2,7 +2,8 @@ const { chromium } = require('playwright');
 const { execFile } = require('child_process');
 const path = require('path');
 
-const BROWSER_USER_DATA_DIR = path.join(__dirname, '..', 'browser-data');
+const DATA_ROOT_DIR = process.env.SCRIPTFORGE_DATA_DIR || path.join(__dirname, '..');
+const BROWSER_USER_DATA_DIR = path.join(DATA_ROOT_DIR, 'browser-data');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

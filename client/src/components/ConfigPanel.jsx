@@ -23,6 +23,10 @@ const sectionClass =
 const fieldClass =
   'mt-3 w-full rounded-xl border border-[#5d527b] bg-[#171227] p-3 text-white outline-none transition duration-200 placeholder:text-gray-500 focus:border-[#c4a1ff] focus:shadow-[0_0_15px_rgba(196,161,255,0.18)] focus:ring-0'
 
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (window.location.port === '5173' ? 'http://localhost:3001' : window.location.origin)
+
 function ConfigPanel({ projects, onStart }) {
   const [projectUrl, setProjectUrl] = useState('')
   const [modelName, setModelName] = useState(MODEL_OPTIONS[0])
@@ -52,7 +56,7 @@ function ConfigPanel({ projects, onStart }) {
   useEffect(() => {
     let cancelled = false
 
-    fetch('http://localhost:3001/prompt-templates')
+    fetch(`${API_BASE_URL}/prompt-templates`)
       .then((response) => response.json())
       .then((payload) => {
         if (!cancelled && Array.isArray(payload?.steps)) {

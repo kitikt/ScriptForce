@@ -2,3 +2,7 @@ node_modules/
 dist/
 browser-data/
 browser-profiles/
+release/
+release-portable*/
+client/dist/
+node_modules/playwright-core/.local-browsers/

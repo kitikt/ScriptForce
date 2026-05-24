@@ -23,7 +23,10 @@ import StepResult from './components/StepResult'
 import TerminalLog from './components/TerminalLog'
 import styles from './App.module.css'
 
-const SOCKET_URL = 'http://localhost:3001'
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (window.location.port === '5173' ? 'http://localhost:3001' : window.location.origin)
+const SOCKET_URL = API_BASE_URL
 const DEFAULT_MAX_ACTIVE_PIPELINES = 2
 
 const STEP_DEFINITIONS = [
@@ -932,12 +935,13 @@ function App() {
               <p className={styles.eyebrow}>Tự động hóa Claude</p>
               <h1 className={styles.heroTitle}>Kết nối browser để bắt đầu pipeline</h1>
               <p className={styles.heroText}>
-                App sẽ mở Chromium ở chế độ lưu session để bạn đăng nhập Claude.ai, sau đó
-                chọn project và chạy tối đa 2 pipeline song song.
+                Bấm nút bên dưới để mở trình duyệt Claude. Bạn chỉ cần đăng nhập một lần,
+                app sẽ tự nhớ tài khoản cho các lần dùng sau.
               </p>
               <p className={styles.heroHint}>
-                Nếu trình duyệt bị đóng hoặc Socket.IO ngắt kết nối, chỉ cần bấm lại
-                Kết nối trình duyệt để thử lại.
+                Sau khi đăng nhập, hãy chọn project rồi bắt đầu chạy pipeline. App có thể
+                chạy cùng lúc tối đa 2 pipeline. Nếu lỡ tắt trình duyệt hoặc mất kết nối,
+                chỉ cần bấm lại Kết nối trình duyệt.
               </p>
               <button
                 type="button"

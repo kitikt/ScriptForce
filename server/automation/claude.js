@@ -648,6 +648,34 @@ async function clickIfVisible(locator) {
   return false;
 }
 
+async function clickClaudeUi(locator, page, label = 'Claude UI control') {
+  if (!locator) {
+    return false;
+  }
+
+  try {
+    await locator.click({ timeout: 8000 });
+    return true;
+  } catch (error) {
+    console.warn(`[Claude] ${label} click was blocked. Clearing overlays and retrying:`, error.message);
+  }
+
+  const disabledBlockers = await clearClaudePointerBlockers(page);
+  if (disabledBlockers > 0) {
+    console.warn(`[Claude] Cleared pointer blockers before ${label} click:`, disabledBlockers);
+  }
+
+  await sleep(250);
+
+  try {
+    await locator.click({ timeout: 8000, force: true });
+    return true;
+  } catch (error) {
+    console.warn(`[Claude] ${label} force click failed:`, error.message);
+    return false;
+  }
+}
+
 async function scrollConversationToBottom(page) {
   try {
     await page.evaluate(() => {
@@ -929,10 +957,11 @@ async function setAdaptiveThinking(page, enabled) {
       return false;
     }
 
-    await modelButton.click();
+    await clickClaudeUi(modelButton, page, 'model selector for adaptive thinking');
     await randomDelay(500, 1200);
 
     const result = await page.evaluate((desiredEnabled) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const isVisible = (element) => {
         if (!element) {
           return false;
@@ -952,6 +981,55 @@ async function setAdaptiveThinking(page, enabled) {
       const readCheckedState = (element) => {
         if (!element) {
           return null;
+        }
+
+        const readDirectState = (target) => {
+          if (!target) {
+            return null;
+          }
+
+          if (target.matches('input[type="checkbox"]')) {
+            return target.checked;
+          }
+
+          const ariaChecked = target.getAttribute('aria-checked');
+          if (ariaChecked === 'true') {
+            return true;
+          }
+          if (ariaChecked === 'false') {
+            return false;
+          }
+
+          const ariaPressed = target.getAttribute('aria-pressed');
+          if (ariaPressed === 'true') {
+            return true;
+          }
+          if (ariaPressed === 'false') {
+            return false;
+          }
+
+          const dataState = target.getAttribute('data-state');
+          if (dataState === 'checked' || dataState === 'on') {
+            return true;
+          }
+          if (dataState === 'unchecked' || dataState === 'off') {
+            return false;
+          }
+
+          return null;
+        };
+
+        const directState = readDirectState(element);
+        if (directState !== null) {
+          return directState;
+        }
+
+        const childControl = element.querySelector?.(
+          '[role="switch"], [aria-checked], input[type="checkbox"], [data-state="checked"], [data-state="unchecked"], [data-state="on"], [data-state="off"]'
+        );
+
+        if (childControl) {
+          return readDirectState(childControl);
         }
 
         if (element.matches('input[type="checkbox"]')) {
@@ -985,33 +1063,83 @@ async function setAdaptiveThinking(page, enabled) {
         return null;
       };
 
-      const rows = Array.from(document.querySelectorAll('button, [role="switch"], [aria-checked], label, div'))
-        .filter((element) => {
-          const text = element.innerText || element.textContent || '';
-          return isVisible(element) && /Adaptive thinking/i.test(text) && text.length < 350;
-        })
-        .sort((a, b) => {
-          const aText = a.innerText || a.textContent || '';
-          const bText = b.innerText || b.textContent || '';
-          return aText.length - bText.length;
-        });
+      const getVisibleText = (element) => normalize(element?.innerText || element?.textContent || '');
+      const getRelatedText = (element, depthLimit = 5) => {
+        const parts = [
+          element?.getAttribute?.('aria-label'),
+          element?.getAttribute?.('title'),
+          getVisibleText(element),
+        ];
+        let current = element?.parentElement || null;
 
-      const row = rows[0];
-      if (!row) {
+        for (let depth = 0; current && depth < depthLimit; depth += 1) {
+          parts.push(current.getAttribute?.('aria-label'), current.getAttribute?.('title'), getVisibleText(current));
+          current = current.parentElement;
+        }
+
+        return normalize(parts.filter(Boolean).join(' '));
+      };
+      const scoreControl = (element) => {
+        const state = readCheckedState(element);
+        const text = getRelatedText(element);
+        const rect = element.getBoundingClientRect();
+        let score = 0;
+
+        if (state !== null) {
+          score -= 1000;
+        }
+
+        if (element.matches('[role="switch"], input[type="checkbox"]')) {
+          score -= 200;
+        }
+
+        if (/Adaptive thinking|Extended thinking/i.test(text)) {
+          score -= 100;
+        }
+
+        score += Math.min(text.length, 1000);
+        score += Math.max(0, rect.width - 120);
+
+        return score;
+      };
+      const controls = Array.from(document.querySelectorAll(
+        '[role="switch"], [aria-checked], input[type="checkbox"], button, [role="menuitem"], [role="option"]'
+      ))
+        .filter((element) => {
+          if (!isVisible(element)) {
+            return false;
+          }
+
+          const text = getRelatedText(element);
+          return /(?:Adaptive|Extended) thinking/i.test(text) && text.length < 900;
+        })
+        .sort((a, b) => scoreControl(a) - scoreControl(b));
+      const control = controls[0];
+
+      if (!control) {
         return { found: false, changed: false, alreadyCorrect: false };
       }
-
-      const controls = [
-        row.matches('[role="switch"], [aria-checked], input[type="checkbox"], button') ? row : null,
-        row.querySelector('[role="switch"], [aria-checked], input[type="checkbox"], button'),
-        row.parentElement?.querySelector('[role="switch"], [aria-checked], input[type="checkbox"], button'),
-      ].filter(Boolean);
-
-      const control = controls.find((candidate) => readCheckedState(candidate) !== null) || controls[0] || row;
       const currentState = readCheckedState(control);
+      const beforeLabel = getRelatedText(control, 3);
+
+      if (currentState === null) {
+        return {
+          found: false,
+          changed: false,
+          alreadyCorrect: false,
+          reason: 'adaptive-state-unknown',
+          label: beforeLabel,
+        };
+      }
 
       if (currentState === desiredEnabled) {
-        return { found: true, changed: false, alreadyCorrect: true };
+        return {
+          found: true,
+          changed: false,
+          alreadyCorrect: true,
+          currentState,
+          label: beforeLabel,
+        };
       }
 
       control.click();
@@ -1020,6 +1148,7 @@ async function setAdaptiveThinking(page, enabled) {
         changed: true,
         alreadyCorrect: false,
         previousState: currentState,
+        label: beforeLabel,
       };
     }, Boolean(enabled));
 
@@ -1027,14 +1156,14 @@ async function setAdaptiveThinking(page, enabled) {
     await page.keyboard.press('Escape').catch(() => {});
 
     if (!result.found) {
-      console.warn('[Claude] Adaptive thinking toggle not found.');
+      console.warn('[Claude] Adaptive/Extended thinking toggle not found.');
       return false;
     }
 
     console.log(
       result.alreadyCorrect
-        ? '[Claude] Adaptive thinking already in requested state.'
-        : '[Claude] Adaptive thinking state updated.'
+        ? `[Claude] Adaptive thinking already ${enabled ? 'on' : 'off'}.`
+        : `[Claude] Adaptive thinking changed from ${result.previousState} to ${enabled}.`
     );
     return true;
   } catch (error) {
@@ -1043,20 +1172,233 @@ async function setAdaptiveThinking(page, enabled) {
   }
 }
 
+function getModelNamePattern(modelName) {
+  const normalized = String(modelName || '').trim().replace(/\s+/g, ' ');
+
+  if (!normalized) {
+    return /^Sonnet 4\.6$/i;
+  }
+
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
+function getModelNameMatcherSource(modelName) {
+  const normalized = String(modelName || 'Sonnet 4.6').trim().replace(/\s+/g, ' ');
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  return `(?:^|\\n|\\s)${escaped}(?:\\s|\\n|$)`;
+}
+
+async function findExactModelOption(page, modelName) {
+  const modelPattern = new RegExp(getModelNameMatcherSource(modelName), 'i');
+  const candidates = page.locator('button, [role="option"], [role="menuitem"], [data-radix-collection-item], [data-base-ui-collection-item], [cmdk-item]');
+  const count = await candidates.count();
+
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+
+    if (!await isLocatorVisible(candidate, 500)) {
+      continue;
+    }
+
+    const text = await candidate.evaluate((element) =>
+      String(element.innerText || element.textContent || '')
+        .split('\n')
+        .map((line) => line.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .join('\n')
+    ).catch(() => '');
+    if (modelPattern.test(text)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function clickExactModelOptionByText(page, modelName) {
+  const clicked = await page.evaluate((targetName) => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const expected = normalize(targetName).toLowerCase();
+
+    if (!expected) {
+      return false;
+    }
+
+    const isVisible = (element) => {
+      if (!element) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number(style.opacity || 1) > 0
+      );
+    };
+
+    const getLines = (element) => {
+      const raw = String(element.innerText || element.textContent || '');
+      const lines = raw
+        .split('\n')
+        .map(normalize)
+        .filter(Boolean);
+      const compact = normalize(raw);
+
+      if (compact && !lines.includes(compact)) {
+        lines.push(compact);
+      }
+
+      return lines;
+    };
+
+    const hasExactModelText = (element) => {
+      const lines = getLines(element).map((line) => line.toLowerCase());
+
+      return lines.some((line) =>
+        line === expected ||
+        line.startsWith(`${expected} `) ||
+        line.includes(` ${expected} `)
+      );
+    };
+
+    const allCandidates = Array.from(document.querySelectorAll(
+      'button, [role="option"], [role="menuitem"], [role="button"], [data-radix-collection-item], [data-base-ui-collection-item], [cmdk-item], div, span'
+    ))
+      .filter((element) => {
+        if (!isVisible(element) || !hasExactModelText(element)) {
+          return false;
+        }
+
+        if (element.closest('[contenteditable="true"]')) {
+          return false;
+        }
+
+        const text = normalize(element.innerText || element.textContent);
+        return text.length <= 240;
+      })
+      .map((element) => {
+        const clickable = element.closest(
+          'button, [role="option"], [role="menuitem"], [role="button"], [data-radix-collection-item], [data-base-ui-collection-item], [cmdk-item]'
+        ) || element;
+        const rect = clickable.getBoundingClientRect();
+
+        return {
+          element,
+          clickable,
+          area: rect.width * rect.height,
+          top: rect.top,
+          left: rect.left,
+        };
+      })
+      .filter(({ clickable }) => isVisible(clickable))
+      .sort((a, b) => {
+        if (a.area !== b.area) {
+          return a.area - b.area;
+        }
+
+        if (a.top !== b.top) {
+          return a.top - b.top;
+        }
+
+        return a.left - b.left;
+      });
+
+    const target = allCandidates[0]?.clickable;
+
+    if (!target) {
+      return false;
+    }
+
+    target.click();
+    return true;
+  }, modelName).catch(() => false);
+
+  if (clicked) {
+    await randomDelay(500, 1200);
+  }
+
+  return clicked;
+}
+
+async function verifySelectedModel(page, modelName, timeoutMs = 5000) {
+  const modelPatternSource = getModelNameMatcherSource(modelName);
+
+  try {
+    await page.waitForFunction(
+      (source) => {
+        const pattern = new RegExp(source, 'i');
+        const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const isVisible = (element) => {
+          const rect = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden'
+          );
+        };
+
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
+          .filter((element) => {
+            if (!isVisible(element)) {
+              return false;
+            }
+
+            const text = normalize(element.innerText || element.textContent || element.getAttribute('aria-label'));
+            return /Sonnet|Opus|Haiku/i.test(text) && text.length <= 160;
+          });
+
+        return candidates.some((element) => {
+          const text = normalize(
+            String(element.innerText || element.textContent || element.getAttribute('aria-label') || '')
+          );
+
+          return pattern.test(text);
+        });
+      },
+      modelPatternSource,
+      { timeout: timeoutMs }
+    );
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function openMoreModelsMenu(page) {
+  const moreModels = await findFirstVisibleLocator([
+    page.getByRole('menuitem', { name: /More models/i }),
+    page.getByRole('button', { name: /More models/i }),
+    page.locator('button, [role="menuitem"]').filter({ hasText: /More models/i }),
+  ]);
+
+  if (!moreModels) {
+    return false;
+  }
+
+  await moreModels.hover().catch(() => {});
+  await sleep(300);
+
+  if (await findExactModelOption(page, 'Opus 4.6')) {
+    return true;
+  }
+
+  return clickClaudeUi(moreModels, page, 'more models menu');
+}
+
 async function selectModel(page, modelName, options = {}) {
   try {
     console.log(`[Claude] Selecting model: ${modelName}`);
-
-    const keyword = String(modelName || '').toLowerCase();
-    let modelPattern = /Sonnet/i;
-
-    if (keyword.includes('opus')) {
-      modelPattern = /Opus/i;
-    } else if (keyword.includes('haiku')) {
-      modelPattern = /Haiku/i;
-    } else if (keyword.includes('sonnet')) {
-      modelPattern = /Sonnet/i;
-    }
 
     const modelButton = await findModelSelectorButton(page);
 
@@ -1066,27 +1408,39 @@ async function selectModel(page, modelName, options = {}) {
     }
 
     console.log('[Claude] Opening model selector...');
-    await modelButton.click();
+    await clickClaudeUi(modelButton, page, 'model selector');
     await randomDelay();
 
-    const modelOption = await findFirstVisibleLocator([
-      page.getByRole('option', { name: modelPattern }),
-      page.getByRole('menuitem', { name: modelPattern }),
-      page.getByRole('button', { name: modelPattern }),
-      page
-        .locator('button, [role="option"], [role="menuitem"]')
-        .filter({ hasText: modelPattern }),
-      page.getByText(modelPattern),
-    ]);
+    let modelOption = await findExactModelOption(page, modelName);
 
-    if (!modelOption) {
-      console.warn(`[Claude] Model option not found for: ${modelName}`);
-      return false;
+    if (!modelOption && /opus\s*4\.6/i.test(String(modelName || ''))) {
+      console.log('[Claude] Exact Opus 4.6 not visible. Opening More models...');
+      if (await openMoreModelsMenu(page)) {
+        await randomDelay(400, 900);
+        modelOption = await findExactModelOption(page, modelName);
+      }
     }
 
-    console.log('[Claude] Clicking model option...');
-    await modelOption.click();
-    await randomDelay();
+    if (!modelOption) {
+      console.warn(`[Claude] Exact model locator not found for: ${modelName}. Trying text fallback...`);
+      if (!await clickExactModelOptionByText(page, modelName)) {
+        console.warn(`[Claude] Model option not found for: ${modelName}`);
+        await page.keyboard.press('Escape').catch(() => {});
+        return false;
+      }
+    } else {
+      console.log('[Claude] Clicking model option...');
+      if (!await clickClaudeUi(modelOption, page, `model option ${modelName}`)) {
+        await page.keyboard.press('Escape').catch(() => {});
+        return false;
+      }
+      await randomDelay();
+    }
+
+    if (!await verifySelectedModel(page, modelName, 5000)) {
+      console.warn(`[Claude] Selected model was not verified as: ${modelName}`);
+      return false;
+    }
 
     if (typeof options.adaptiveThinking === 'boolean') {
       await setAdaptiveThinking(page, options.adaptiveThinking);
@@ -1196,7 +1550,27 @@ async function verifyChatName(page, chatName, timeoutMs = 5000) {
   }
 }
 
+async function findChatTitleTrigger(page) {
+  return await findFirstVisibleLocator([
+    page.locator('[data-testid="chat-title-button"]'),
+    page.locator('button[aria-label*="rename chat" i]'),
+    page.locator('[role="button"][aria-label*="rename chat" i]'),
+    page.locator('button[aria-label*="edit title" i]'),
+    page.locator('[role="button"][aria-label*="edit title" i]'),
+  ]);
+}
+
 async function openChatTitleMenu(page) {
+  const titleTrigger = await findChatTitleTrigger(page);
+
+  if (titleTrigger) {
+    if (!await clickClaudeUi(titleTrigger, page, 'chat title trigger')) {
+      return false;
+    }
+    await randomDelay(500, 1200);
+    return true;
+  }
+
   const directMenuButton = await findFirstVisibleLocator([
     page.getByRole('button', { name: /Chat options|Conversation options|More options/i }),
     page.locator('header button[aria-haspopup="menu"]'),
@@ -1205,7 +1579,9 @@ async function openChatTitleMenu(page) {
   ]);
 
   if (directMenuButton) {
-    await directMenuButton.click();
+    if (!await clickClaudeUi(directMenuButton, page, 'chat title menu')) {
+      return false;
+    }
     await randomDelay(500, 1200);
     return true;
   }
@@ -1235,7 +1611,7 @@ async function openChatTitleMenu(page) {
         return (
           text.length > 0 &&
           !/share|send|stop|continue|retry|new chat/i.test(text) &&
-          rect.top >= 80 &&
+          rect.top >= 40 &&
           rect.top <= 180 &&
           rect.left >= 60 &&
           rect.width >= 80
@@ -1271,24 +1647,114 @@ async function openChatTitleMenu(page) {
 }
 
 async function findRenameMenuItem(page) {
-  return findFirstVisibleLocator([
-    page.getByRole('menuitem', { name: /Rename|Edit title|Edit chat|Edit conversation/i }),
-    page.getByRole('button', { name: /Rename|Edit title|Edit chat|Edit conversation/i }),
-    page.locator('[role="menuitem"], [cmdk-item], button').filter({ hasText: /Rename|Edit title|Edit chat|Edit conversation/i }),
-    page.getByText(/Rename|Edit title|Edit chat|Edit conversation/i),
-  ]);
+  const candidates = page.locator(
+    '[role="menuitem"], [cmdk-item], [data-radix-collection-item], [data-base-ui-collection-item], [data-testid*="menu" i] button, [role="menu"] button'
+  );
+  const count = await candidates.count();
+
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+
+    if (!await isLocatorVisible(candidate, 500)) {
+      continue;
+    }
+
+    const info = await candidate.evaluate((element) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      return {
+        text: normalize(element.innerText || element.textContent),
+        aria: normalize(element.getAttribute('aria-label')),
+        testId: normalize(element.getAttribute('data-testid')),
+        role: normalize(element.getAttribute('role')),
+      };
+    }).catch(() => null);
+    const label = `${info?.text || ''} ${info?.aria || ''}`.trim();
+
+    if (!/Rename|Edit title|Edit chat|Edit conversation/i.test(label)) {
+      continue;
+    }
+
+    if (/chat-title-button/i.test(info?.testId || '')) {
+      continue;
+    }
+
+    return candidate;
+  }
+
+  return null;
+}
+
+async function findRenameField(page) {
+  const candidates = page.locator('input, textarea, [role="textbox"], [contenteditable="true"]');
+  const count = await candidates.count();
+
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+
+    if (!await isLocatorVisible(candidate, 500)) {
+      continue;
+    }
+
+    const info = await candidate.evaluate((element) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const rect = element.getBoundingClientRect();
+      const labelBits = [
+        element.getAttribute('aria-label'),
+        element.getAttribute('placeholder'),
+        element.getAttribute('name'),
+        element.getAttribute('data-testid'),
+        element.textContent,
+      ].map(normalize).join(' ');
+
+      return {
+        label: normalize(labelBits),
+        top: rect.top,
+        left: rect.left,
+        focused: document.activeElement === element,
+        inDialog: Boolean(element.closest('[role="dialog"]')),
+        inHeader: Boolean(element.closest('header')),
+        testId: normalize(element.getAttribute('data-testid')),
+      };
+    }).catch(() => null);
+
+    if (!info) {
+      continue;
+    }
+
+    if (/chat-input|write your prompt|write a message|search/i.test(info.label) || /chat-input/i.test(info.testId)) {
+      continue;
+    }
+
+    if (
+      info.inDialog ||
+      info.inHeader ||
+      /rename|title|conversation name|chat name|name/i.test(info.label) ||
+      (info.focused && info.top >= 0 && info.top <= 180 && info.left >= 60)
+    ) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 async function renameChatViaUi(page, chatName) {
   console.log('[Claude] Trying UI rename fallback...');
 
   const openedMenu = await openChatTitleMenu(page);
-  const renameMenuItem = openedMenu ? await findRenameMenuItem(page) : null;
+  let renameField = openedMenu ? await findRenameField(page) : null;
+  const renameMenuItem = !renameField && openedMenu ? await findRenameMenuItem(page) : null;
 
   if (renameMenuItem) {
-    await renameMenuItem.click();
+    if (!await clickClaudeUi(renameMenuItem, page, 'rename menu item')) {
+      console.warn('[Claude] Rename menu item click failed.');
+      return false;
+    }
     await randomDelay(500, 1200);
-  } else {
+    renameField = await findRenameField(page);
+  }
+
+  if (!renameField) {
     if (openedMenu) {
       await page.keyboard.press('Escape');
       await sleep(300);
@@ -1364,24 +1830,18 @@ async function renameChatViaUi(page, chatName) {
       }
     } else {
       console.log('[Claude] Rename menu not found. Trying double-click title...');
-      await titleHeading.dblclick();
+      try {
+        await titleHeading.dblclick({ timeout: 8000 });
+      } catch (error) {
+        console.warn('[Claude] Title double-click was blocked. Clearing overlays and retrying:', error.message);
+        await clearClaudePointerBlockers(page);
+        await titleHeading.dblclick({ timeout: 8000, force: true });
+      }
     }
 
     await randomDelay(500, 1200);
+    renameField = await findRenameField(page);
   }
-
-  const renameField = await findFirstVisibleLocator([
-    page.locator('input:focus'),
-    page.locator('textarea:focus'),
-    page.locator('[contenteditable="true"]:focus'),
-    page.locator('[role="dialog"] input[type="text"]'),
-    page.locator('[role="dialog"] textarea'),
-    page.locator('[role="dialog"] [contenteditable="true"]'),
-    page.locator('header input[type="text"]'),
-    page.locator('header textarea'),
-    page.locator('header [contenteditable="true"]'),
-    page.locator('input[type="text"]').filter({ hasNotText: /Search/i }),
-  ]);
 
   if (!renameField) {
     console.warn('[Claude] Rename UI field not found.');
@@ -1396,7 +1856,9 @@ async function renameChatViaUi(page, chatName) {
     (element) => element.getAttribute('contenteditable') === 'true'
   );
 
-  await renameField.click();
+  if (!await clickClaudeUi(renameField, page, 'rename field')) {
+    return false;
+  }
 
   if (tagName === 'input' || tagName === 'textarea') {
     await renameField.fill('');
@@ -1422,7 +1884,9 @@ async function renameChatViaUi(page, chatName) {
   ]);
 
   if (saveButton) {
-    await saveButton.click();
+    if (!await clickClaudeUi(saveButton, page, 'rename save button')) {
+      return false;
+    }
   } else {
     await page.keyboard.press('Enter');
   }

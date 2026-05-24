@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "",
-  "main": "index.js",
+  "main": "electron/main.js",
   "workspaces": [
     "client",
     "server"
@@ -14,15 +14,52 @@
     "dev:client": "npm --workspace client run dev",
     "dev:server": "npm --workspace server run dev",
     "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
+    "build:client": "npm --workspace client run build",
+    "desktop:dev": "npm run build:client && electron .",
+    "browsers:install:local": "node scripts/install-local-browsers.js",
+    "portable:win": "npm run build:client && npm run browsers:install:local && node scripts/build-windows-portable.js",
     "setup": "npm install && npm run browsers:install",
     "browsers:install": "cd server && npx playwright install chromium",
     "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "build": {
+    "appId": "com.scriptforge.app",
+    "productName": "ScriptForge",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "client/dist/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/playwright/**/*",
+      "node_modules/playwright-core/**/*",
+      "server/node_modules/playwright/**/*",
+      "server/node_modules/playwright-core/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "@electron/packager": "^20.0.0",
+    "concurrently": "^9.2.1",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1"
   }
 }

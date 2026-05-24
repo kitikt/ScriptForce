@@ -2,10 +2,11 @@ const fs = require('fs/promises');
 const path = require('path');
 const { randomUUID } = require('crypto');
 
-const PROFILE_ROOT_DIR = path.join(__dirname, '..', 'browser-profiles');
+const DATA_ROOT_DIR = process.env.SCRIPTFORGE_DATA_DIR || path.join(__dirname, '..');
+const PROFILE_ROOT_DIR = path.join(DATA_ROOT_DIR, 'browser-profiles');
 const PROFILE_CONFIG_PATH = path.join(PROFILE_ROOT_DIR, 'profiles.json');
 const DEFAULT_PROFILE_ID = 'default';
-const DEFAULT_PROFILE_DIR = path.join(__dirname, '..', 'browser-data');
+const DEFAULT_PROFILE_DIR = path.join(DATA_ROOT_DIR, 'browser-data');
 
 function nowIso() {
   return new Date().toISOString();

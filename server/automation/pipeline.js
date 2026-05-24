@@ -365,7 +365,10 @@ async function runPipeline(page, config, socket, runtime = {}) {
       pipelineId
     );
     emitUrlLog(socket, provider, pipelineId);
-    await provider.selectModel(config.modelName, { adaptiveThinking });
+    const selectedModel = await provider.selectModel(config.modelName, { adaptiveThinking });
+    if (!selectedModel) {
+      throw new Error(`Khong chon duoc model ${config.modelName}. Pipeline da dung de tranh chay sai model.`);
+    }
     emitLog(socket, 'Đã chọn model xong.', pipelineId);
     emitUrlLog(socket, provider, pipelineId);
 
