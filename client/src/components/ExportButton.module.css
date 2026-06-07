@@ -1,3 +1,8 @@
+.exportMenu {
+  position: relative;
+  display: inline-flex;
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -21,9 +26,113 @@
   box-shadow: 0 12px 36px rgba(196, 161, 255, 0.42);
 }
 
+.menuPanel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.75rem);
+  z-index: 50;
+  width: min(430px, calc(100vw - 2rem));
+  max-height: 420px;
+  overflow: auto;
+  padding: 0.7rem;
+  border: 1px solid rgba(203, 178, 255, 0.24);
+  border-radius: 20px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.03)),
+    rgba(25, 18, 43, 0.96);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(18px);
+}
+
+.menuItem,
+.menuItemAccent {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: transparent;
+  color: #f7f2ff;
+  cursor: pointer;
+  padding: 0.82rem;
+  text-align: left;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.menuItem:hover,
+.menuItemAccent:hover {
+  transform: translateY(-1px);
+  border-color: rgba(196, 161, 255, 0.36);
+  background: rgba(196, 161, 255, 0.12);
+}
+
+.menuItem svg,
+.menuItemAccent svg {
+  flex: 0 0 auto;
+  margin-top: 0.18rem;
+  color: #c4a1ff;
+}
+
+.menuItem span,
+.menuItemAccent span {
+  min-width: 0;
+  display: grid;
+  gap: 0.22rem;
+}
+
+.menuItem strong,
+.menuItemAccent strong {
+  overflow-wrap: anywhere;
+  font-size: 0.9rem;
+  line-height: 1.25;
+}
+
+.menuItem small,
+.menuItemAccent small {
+  color: #a99bc4;
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
+.menuItemAccent {
+  margin-top: 0.4rem;
+  background: rgba(34, 231, 213, 0.08);
+}
+
+.menuItemAccent svg {
+  color: #22e7d5;
+}
+
+.menuDivider {
+  height: 1px;
+  margin: 0.55rem 0;
+  background: rgba(203, 178, 255, 0.16);
+}
+
+.menuLabel {
+  padding: 0 0.8rem 0.45rem;
+  color: #c4a1ff;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
 @media (max-width: 980px) {
+  .exportMenu,
   .button {
     width: 100%;
+  }
+
+  .button {
     justify-content: center;
+  }
+
+  .menuPanel {
+    left: 0;
+    right: 0;
+    width: 100%;
   }
 }

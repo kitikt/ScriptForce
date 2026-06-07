@@ -21,6 +21,19 @@
   font-family: 'JetBrains Mono', monospace;
 }
 
+.artifactBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+  border: 1px solid rgba(196, 161, 255, 0.28);
+  border-radius: 999px;
+  background: rgba(196, 161, 255, 0.11);
+  color: #decfff;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.78rem;
+}
+
 .eyebrow {
   margin: 0;
   color: #c4a1ff;
@@ -65,6 +78,11 @@
 .expanded {
   max-height: 400px;
   overflow: auto;
+}
+
+.artifactBody {
+  max-height: none;
+  overflow: visible;
 }
 
 .footer {

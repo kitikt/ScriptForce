@@ -49,10 +49,17 @@ function createClaudeWebProvider(page) {
     async sendPrompt(prompt, options = {}) {
       const responseBaseline = await sendMessage(page, prompt);
       const responseText = await waitForResponse(page, responseBaseline, options);
-      const shouldCheckArtifact = Number(options.stepNumber || 0) >= 7;
+      const shouldCheckArtifact =
+        Number(options.stepNumber || 0) >= 7 ||
+        /\b(?:artifact|txt|download)\b/i.test(responseText) ||
+        /file.{0,80}(?:created|saved|attached|generated)|created.{0,80}file|saved.{0,80}file/i.test(responseText) ||
+        /this block is not supported on your current device yet/i.test(responseText);
 
       if (!shouldCheckArtifact) {
-        return responseText;
+        return {
+          text: responseText,
+          artifacts: [],
+        };
       }
 
       const artifact = await extractClaudeArtifactText(page, {
@@ -61,7 +68,22 @@ function createClaudeWebProvider(page) {
         baselineArtifactSignature: responseBaseline.artifactSignature,
       });
 
-      return artifact?.text || responseText;
+      const artifacts = artifact
+        ? [{
+            stepNumber: options.stepNumber,
+            stepName: options.stepName,
+            fileName: artifact.fileName || artifact.name || `step-${options.stepNumber || 'artifact'}-artifact.txt`,
+            source: artifact.source || 'artifact',
+            text: artifact.text,
+            path: artifact.path || '',
+            createdAt: new Date().toISOString(),
+          }]
+        : [];
+
+      return {
+        text: artifact?.text || responseText,
+        artifacts,
+      };
     },
   };
 }

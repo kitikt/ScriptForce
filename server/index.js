@@ -20,11 +20,16 @@ const {
 const { createClaudeWebProvider } = require('./automation/providers/claudeWebProvider');
 const { readClaudeUsage } = require('./automation/usage');
 const { STEPS } = require('./prompts/templates');
+const {
+  deleteTemplate,
+  readTemplates,
+  saveTemplate,
+} = require('./prompts/pipelineTemplates');
 
 const PORT = Number(process.env.PORT || 3001);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 const CLIENT_DIST_DIR = process.env.CLIENT_DIST_DIR || '';
-const MAX_ACTIVE_PIPELINES = 2;
+const MAX_ACTIVE_PIPELINES = 0;
 const USAGE_POLL_INTERVAL_MS = 30000;
 
 const app = express();
@@ -68,8 +73,50 @@ function isPipelineActive(job) {
   return job && !['done', 'stopped', 'error'].includes(job.status);
 }
 
+function requestStopPipelineJob(job) {
+  if (!job || !isPipelineActive(job)) {
+    return;
+  }
+
+  job.stopped = true;
+  job.status = 'stopped';
+  job.statusMessage = 'Pipeline da dung.';
+  job.reviewStep = null;
+  job.finishedAt = new Date().toISOString();
+  job.stopNotified = true;
+
+  try {
+    job.resumeUrl = isBrowserPageAlive(job.page) ? job.page.url() : job.resumeUrl;
+  } catch {
+    // Keep the previous resume URL if the page is already gone.
+  }
+
+  if (job.emitter) {
+    job.emitter.emit('stop_pipeline', { pipelineId: job.pipelineId });
+  }
+
+  io.emit('pipeline_stopped', {
+    pipelineId: job.pipelineId,
+    results: job.results,
+  });
+  io.emit('pipeline_capacity', {
+    activeCount: getActivePipelineCount(),
+    maxActivePipelines: MAX_ACTIVE_PIPELINES,
+  });
+
+  if (isBrowserPageAlive(job.page)) {
+    job.page.close().catch((error) => {
+      console.warn(`[Server] Could not close stopped pipeline page ${job.pipelineId}:`, error.message);
+    });
+  }
+}
+
 function getActivePipelineCount() {
   return Array.from(pipelineJobs.values()).filter(isPipelineActive).length;
+}
+
+function hasActivePipelineLimit() {
+  return MAX_ACTIVE_PIPELINES > 0;
 }
 
 function getPublicJob(job) {
@@ -77,11 +124,19 @@ function getPublicJob(job) {
     pipelineId: job.pipelineId,
     status: job.status,
     config: {
+      templateId: job.config.templateId,
+      templateName: job.config.templateName,
       chatName: job.config.chatName,
       projectUrl: job.config.projectUrl,
       modelName: job.config.modelName,
       semiAuto: Boolean(job.config.semiAuto),
       adaptiveThinking: job.config.adaptiveThinking !== false,
+      promptSteps: Array.isArray(job.config.promptSteps)
+        ? job.config.promptSteps.map((step) => ({
+            stepNumber: step.stepNumber,
+            name: step.name,
+          }))
+        : [],
       customPromptSteps: Array.isArray(job.config.customPromptSteps)
         ? job.config.customPromptSteps.map((step) => ({
             stepNumber: step.stepNumber,
@@ -357,6 +412,7 @@ function createJobSocket(socket, job) {
             stepNumber,
             stepName: payload?.stepName || '',
             result: payload?.result || '',
+            artifacts: Array.isArray(payload?.artifacts) ? payload.artifacts : [],
           };
         }
         job.currentStep = stepNumber || job.currentStep;
@@ -375,6 +431,10 @@ function createJobSocket(socket, job) {
         job.results = payload?.results || job.results;
         job.reviewStep = null;
         job.finishedAt = new Date().toISOString();
+        if (job.stopNotified) {
+          return;
+        }
+        job.stopNotified = true;
       }
 
       if (eventName === 'error') {
@@ -417,7 +477,10 @@ async function startPipelineJob(socket, config) {
     return;
   }
 
-  if (getActivePipelineCount() >= MAX_ACTIVE_PIPELINES) {
+  if (
+    hasActivePipelineLimit() &&
+    getActivePipelineCount() >= MAX_ACTIVE_PIPELINES
+  ) {
     socket.emit('pipeline_rejected', {
       error: `Chỉ có thể chạy tối đa ${MAX_ACTIVE_PIPELINES} pipeline cùng lúc.`,
       maxActivePipelines: MAX_ACTIVE_PIPELINES,
@@ -470,10 +533,192 @@ async function startPipelineJob(socket, config) {
       }
     })
     .catch((error) => {
+      if (job.stopped) {
+        job.status = 'stopped';
+        job.statusMessage = 'Pipeline da dung.';
+        job.reviewStep = null;
+        job.finishedAt = new Date().toISOString();
+        if (!job.stopNotified) {
+          io.emit('pipeline_stopped', {
+            pipelineId,
+            results: job.results,
+          });
+          job.stopNotified = true;
+        }
+        return;
+      }
+
       console.error(`[Server] Pipeline ${pipelineId} failed:`, error);
       job.status = 'error';
       job.statusMessage = getClientErrorMessage(error);
       job.errorStep = job.currentStep || 0;
+      try {
+        job.resumeUrl = isBrowserPageAlive(page) ? page.url() : job.resumeUrl;
+      } catch {
+        // Keep the previous resume URL if the page is already gone.
+      }
+      job.finishedAt = new Date().toISOString();
+      io.emit('pipeline_failed', {
+        pipelineId,
+        error: getClientErrorMessage(error),
+      });
+    })
+    .finally(async () => {
+      if (!job.finishedAt) {
+        job.finishedAt = new Date().toISOString();
+      }
+      await page.close().catch(() => {});
+      io.emit('pipeline_capacity', {
+        activeCount: getActivePipelineCount(),
+        maxActivePipelines: MAX_ACTIVE_PIPELINES,
+      });
+    });
+}
+
+function getResumeStepNumber(job) {
+  const currentStep = Number(job?.currentStep || 0);
+  const completedSteps = Object.keys(job?.results || {})
+    .map((stepNumber) => Number(stepNumber))
+    .filter((stepNumber) => Number.isFinite(stepNumber));
+  const highestCompleted = completedSteps.length > 0 ? Math.max(...completedSteps) : 0;
+
+  if (job?.status === 'stopped') {
+    if (currentStep > 0 && completedSteps.includes(currentStep)) {
+      return currentStep + 1;
+    }
+
+    return currentStep || highestCompleted + 1 || 1;
+  }
+
+  return job?.errorStep || currentStep || highestCompleted + 1 || 1;
+}
+
+async function retryPipelineJob(socket, pipelineId, options = {}) {
+  const job = pipelineJobs.get(pipelineId);
+  const mode = options.mode || 'retry';
+
+  if (!job) {
+    socket.emit('error', {
+      pipelineId,
+      stepNumber: 0,
+      error: 'Khong tim thay pipeline de thu lai.',
+    });
+    return;
+  }
+
+  if (job.status !== 'error' && job.status !== 'stopped') {
+    socket.emit('error', {
+      pipelineId,
+      stepNumber: job.currentStep || 0,
+      error: 'Chi co the tiep tuc pipeline dang loi hoac da dung.',
+    });
+    return;
+  }
+
+  if (!isBrowserContextAlive(browserContext)) {
+    browserContext = null;
+    browserPage = null;
+    socket.emit('error', {
+      pipelineId,
+      stepNumber: job.errorStep || job.currentStep || 0,
+      error: 'Browser chua duoc khoi tao hoac da bi dong. Vui long ket noi browser truoc.',
+    });
+    return;
+  }
+
+  if (
+    hasActivePipelineLimit() &&
+    getActivePipelineCount() >= MAX_ACTIVE_PIPELINES
+  ) {
+    socket.emit('pipeline_rejected', {
+      error: `Chi co the chay toi da ${MAX_ACTIVE_PIPELINES} pipeline cung luc.`,
+      maxActivePipelines: MAX_ACTIVE_PIPELINES,
+    });
+    return;
+  }
+
+  const startStepNumber = getResumeStepNumber(job);
+  const resumeUrl = job.resumeUrl;
+
+  if (!resumeUrl || !/^https:\/\/claude\.ai\/chat\//i.test(resumeUrl)) {
+    socket.emit('error', {
+      pipelineId,
+      stepNumber: startStepNumber,
+      error: 'Khong co URL chat de thu lai dung buoc loi. Hay chay pipeline moi.',
+    });
+    return;
+  }
+
+  await job.page?.close?.().catch(() => {});
+  const page = await createPipelinePage(browserContext);
+  job.page = page;
+  job.status = 'starting';
+  job.errorStep = 0;
+  job.reviewStep = null;
+  job.stopped = false;
+  job.stopNotified = false;
+  job.finishedAt = null;
+  job.emitter = new EventEmitter();
+  job.statusMessage = mode === 'resume'
+    ? `Dang tiep tuc tu buoc ${startStepNumber}.`
+    : `Dang thu lai tu buoc ${startStepNumber}.`;
+  job.logs.push({
+    time: new Date().toLocaleTimeString('en-GB'),
+    message: mode === 'resume'
+      ? `Dang tiep tuc pipeline tu buoc ${startStepNumber}.`
+      : `Dang thu lai pipeline tu buoc ${startStepNumber}.`,
+  });
+
+  await page.goto(resumeUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+
+  io.emit('pipeline_retrying', {
+    job: getPublicJob(job),
+    startStepNumber,
+    activeCount: getActivePipelineCount(),
+    maxActivePipelines: MAX_ACTIVE_PIPELINES,
+  });
+
+  const jobSocket = createJobSocket(socket, job);
+
+  runPipeline(page, job.config, jobSocket, {
+    pipelineId,
+    shouldStop: () => job.stopped,
+    skipSetup: true,
+    startStepNumber,
+    initialResults: job.results,
+  })
+    .then(() => {
+      if (!job.finishedAt) {
+        job.status = job.stopped ? 'stopped' : 'done';
+        job.finishedAt = new Date().toISOString();
+      }
+    })
+    .catch((error) => {
+      if (job.stopped) {
+        job.status = 'stopped';
+        job.statusMessage = 'Pipeline da dung.';
+        job.reviewStep = null;
+        job.finishedAt = new Date().toISOString();
+        if (!job.stopNotified) {
+          io.emit('pipeline_stopped', {
+            pipelineId,
+            results: job.results,
+          });
+          job.stopNotified = true;
+        }
+        return;
+      }
+
+      console.error(`[Server] Pipeline retry ${pipelineId} failed:`, error);
+      job.status = 'error';
+      job.statusMessage = getClientErrorMessage(error);
+      job.errorStep = job.currentStep || startStepNumber;
+      try {
+        job.resumeUrl = isBrowserPageAlive(page) ? page.url() : job.resumeUrl;
+      } catch {
+        // Keep the previous resume URL if the page is already gone.
+      }
       job.finishedAt = new Date().toISOString();
       io.emit('pipeline_failed', {
         pipelineId,
@@ -511,6 +756,43 @@ app.get('/prompt-templates', (_req, res) => {
       prompt: step.buildPrompt('{{originalScript}}'),
     })),
   });
+});
+
+app.get('/pipeline-templates', async (_req, res) => {
+  try {
+    res.json({
+      templates: await readTemplates(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: getClientErrorMessage(error),
+    });
+  }
+});
+
+app.post('/pipeline-templates', async (req, res) => {
+  try {
+    const template = await saveTemplate(req.body || {});
+    res.json({
+      template,
+      templates: await readTemplates(),
+    });
+  } catch (error) {
+    res.status(400).json({
+      error: getClientErrorMessage(error),
+    });
+  }
+});
+
+app.delete('/pipeline-templates/:templateId', async (req, res) => {
+  try {
+    const templates = await deleteTemplate(req.params.templateId);
+    res.json({ templates });
+  } catch (error) {
+    res.status(400).json({
+      error: getClientErrorMessage(error),
+    });
+  }
 });
 
 if (CLIENT_DIST_DIR) {
@@ -558,7 +840,7 @@ io.on('connection', (socket) => {
         return;
       }
 
-      socket.emit('status', `Đang mở Claude profile: ${profile.label}`);
+      socket.emit('status', `Đang mở Claude profile nền: ${profile.label}`);
       browserInitPromise = initBrowser(socket, {
         userDataDir: profile.userDataDir,
       });
@@ -593,6 +875,52 @@ io.on('connection', (socket) => {
         error: getClientErrorMessage(error),
       });
     }
+  });
+
+  socket.on('retry_pipeline', async (payload = {}) => {
+    try {
+      await retryPipelineJob(socket, payload.pipelineId);
+    } catch (error) {
+      console.error('[Server] retry_pipeline failed:', error);
+      socket.emit('error', {
+        pipelineId: payload.pipelineId,
+        stepNumber: 0,
+        error: getClientErrorMessage(error),
+      });
+    }
+  });
+
+  socket.on('resume_pipeline', async (payload = {}) => {
+    try {
+      await retryPipelineJob(socket, payload.pipelineId, { mode: 'resume' });
+    } catch (error) {
+      console.error('[Server] resume_pipeline failed:', error);
+      socket.emit('error', {
+        pipelineId: payload.pipelineId,
+        stepNumber: 0,
+        error: getClientErrorMessage(error),
+      });
+    }
+  });
+
+  socket.on('delete_pipeline', (payload = {}) => {
+    const pipelineId = payload?.pipelineId;
+    const job = pipelineId ? pipelineJobs.get(pipelineId) : null;
+
+    if (!job) {
+      return;
+    }
+
+    if (isPipelineActive(job)) {
+      requestStopPipelineJob(job);
+    }
+
+    pipelineJobs.delete(pipelineId);
+    io.emit('pipeline_deleted', {
+      pipelineId,
+      activeCount: getActivePipelineCount(),
+      maxActivePipelines: MAX_ACTIVE_PIPELINES,
+    });
   });
 
   socket.on('list_profiles', async () => {
@@ -703,9 +1031,7 @@ io.on('connection', (socket) => {
     if (!pipelineId) {
       console.log('[Server] Stop all active pipelines requested.');
       for (const job of pipelineJobs.values()) {
-        if (isPipelineActive(job)) {
-          job.stopped = true;
-        }
+        requestStopPipelineJob(job);
       }
       return;
     }
@@ -716,7 +1042,7 @@ io.on('connection', (socket) => {
     }
 
     console.log(`[Server] Stop pipeline requested: ${pipelineId}`);
-    job.stopped = true;
+    requestStopPipelineJob(job);
   });
 
   socket.on('disconnect', () => {

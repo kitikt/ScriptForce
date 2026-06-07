@@ -20,8 +20,14 @@ const CONTEXT_LIMIT_PATTERNS = [
   /reduce the length/i,
 ];
 const CLAUDE_CONNECTION_ERROR_PATTERNS = [
+  /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i,
   /we (?:couldn['’]?t|could not) connect to claude/i,
   /(?:couldn['’]?t|could not) connect to claude/i,
+  /your previous message wasn['’]?t sent/i,
+  /your message was sent, but claude couldn['’]?t respond/i,
+  /claude couldn['’]?t respond/i,
+  /another response is already running/i,
+  /wait for it to finish before trying again/i,
   /unable to connect to claude/i,
   /problem connecting to claude/i,
   /connection (?:to claude )?(?:failed|lost|interrupted)/i,
@@ -43,12 +49,50 @@ function normalizeClaudeUrl(url, baseUrl = CLAUDE_ORIGIN) {
   return new URL(url, baseUrl).toString();
 }
 
+function isClaudeTooManyChatsMessage(message) {
+  return /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i.test(
+    String(message || '')
+  );
+}
+
 function createClaudeConnectionError(message) {
   const error = new Error(
     message || 'Claude connection error detected. The response was not completed.'
   );
-  error.code = 'CLAUDE_CONNECTION_ERROR';
+  error.code = isClaudeTooManyChatsMessage(message)
+    ? 'CLAUDE_TOO_MANY_CHATS'
+    : 'CLAUDE_CONNECTION_ERROR';
   return error;
+}
+
+function createClaudeInputNotReadyError(message) {
+  const error = new Error(
+    message || 'Claude chat input was not ready. The step can be retried.'
+  );
+  error.code = 'CLAUDE_INPUT_NOT_READY';
+  return error;
+}
+
+function getClaudeConnectionErrorMatch(message) {
+  const text = String(message || '');
+  if (!text) {
+    return '';
+  }
+
+  for (const pattern of CLAUDE_CONNECTION_ERROR_PATTERNS) {
+    const match = text.match(pattern);
+    if (match) {
+      const start = Math.max(0, match.index - 80);
+      const end = Math.min(text.length, match.index + match[0].length + 120);
+      return text.slice(start, end).trim();
+    }
+  }
+
+  return '';
+}
+
+function isClaudeFailureText(message) {
+  return Boolean(getClaudeConnectionErrorMatch(message));
 }
 
 function toRelativeClaudeUrl(url) {
@@ -1185,9 +1229,36 @@ function getModelNamePattern(modelName) {
 
 function getModelNameMatcherSource(modelName) {
   const normalized = String(modelName || 'Sonnet 4.6').trim().replace(/\s+/g, ' ');
-  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = normalized
+    .split(' ')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('\\s+');
 
   return `(?:^|\\n|\\s)${escaped}(?:\\s|\\n|$)`;
+}
+
+function getModelFamily(modelName) {
+  const normalized = String(modelName || '').trim();
+
+  if (/opus/i.test(normalized)) {
+    return 'Opus';
+  }
+
+  if (/sonnet/i.test(normalized)) {
+    return 'Sonnet';
+  }
+
+  if (/haiku/i.test(normalized)) {
+    return 'Haiku';
+  }
+
+  return '';
+}
+
+function getModelFamilyMatcherSource(modelName) {
+  const family = getModelFamily(modelName);
+
+  return family ? `(?:^|\\n|\\s)${family}(?:\\s|\\n|$)` : '';
 }
 
 async function findExactModelOption(page, modelName) {
@@ -1215,6 +1286,51 @@ async function findExactModelOption(page, modelName) {
   }
 
   return null;
+}
+
+async function findModelFamilyOption(page, modelName) {
+  const familyPatternSource = getModelFamilyMatcherSource(modelName);
+
+  if (!familyPatternSource) {
+    return null;
+  }
+
+  const familyPattern = new RegExp(familyPatternSource, 'i');
+  const candidates = page.locator('button, [role="option"], [role="menuitem"], [data-radix-collection-item], [data-base-ui-collection-item], [cmdk-item]');
+  const count = await candidates.count();
+  const matches = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+
+    if (!await isLocatorVisible(candidate, 500)) {
+      continue;
+    }
+
+    const text = await candidate.evaluate((element) =>
+      String(element.innerText || element.textContent || '')
+        .split('\n')
+        .map((line) => line.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .join('\n')
+    ).catch(() => '');
+
+    if (!familyPattern.test(text) || /more models/i.test(text)) {
+      continue;
+    }
+
+    matches.push({ candidate, text });
+  }
+
+  matches.sort((left, right) => {
+    const preferredVersion = /4\.6/i;
+    const leftPreferred = preferredVersion.test(left.text) ? 0 : 1;
+    const rightPreferred = preferredVersion.test(right.text) ? 0 : 1;
+
+    return leftPreferred - rightPreferred;
+  });
+
+  return matches[0]?.candidate || null;
 }
 
 async function clickExactModelOptionByText(page, modelName) {
@@ -1329,11 +1445,13 @@ async function clickExactModelOptionByText(page, modelName) {
 
 async function verifySelectedModel(page, modelName, timeoutMs = 5000) {
   const modelPatternSource = getModelNameMatcherSource(modelName);
+  const familyPatternSource = getModelFamilyMatcherSource(modelName);
 
   try {
     await page.waitForFunction(
-      (source) => {
+      ({ source, familySource }) => {
         const pattern = new RegExp(source, 'i');
+        const familyPattern = familySource ? new RegExp(familySource, 'i') : null;
         const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
         const isVisible = (element) => {
           const rect = element.getBoundingClientRect();
@@ -1362,10 +1480,10 @@ async function verifySelectedModel(page, modelName, timeoutMs = 5000) {
             String(element.innerText || element.textContent || element.getAttribute('aria-label') || '')
           );
 
-          return pattern.test(text);
+          return pattern.test(text) || Boolean(familyPattern && familyPattern.test(text));
         });
       },
-      modelPatternSource,
+      { source: modelPatternSource, familySource: familyPatternSource },
       { timeout: timeoutMs }
     );
 
@@ -1419,6 +1537,11 @@ async function selectModel(page, modelName, options = {}) {
         await randomDelay(400, 900);
         modelOption = await findExactModelOption(page, modelName);
       }
+    }
+
+    if (!modelOption && getModelFamily(modelName)) {
+      console.log(`[Claude] Exact model not visible. Trying ${getModelFamily(modelName)} family option...`);
+      modelOption = await findModelFamilyOption(page, modelName);
     }
 
     if (!modelOption) {
@@ -1932,11 +2055,9 @@ async function sendMessage(page, text) {
     responseBaseline.submittedText = text;
     responseBaseline.artifactSignature = await getVisibleArtifactSignature(page);
 
-    const input = await findVisibleChatInput(page);
+    await waitForClaudeReadyToSend(page);
 
-    if (!input) {
-      throw new Error('Chat input not found.');
-    }
+    const input = await waitForVisibleChatInput(page);
 
     console.log('[Claude] Focusing chat input...');
     await focusChatInput(page, input);
@@ -1946,23 +2067,8 @@ async function sendMessage(page, text) {
     await page.keyboard.press('Control+A');
     await page.keyboard.press('Backspace');
 
-    let pasted = false;
-
-    try {
-      console.log('[Claude] Pasting message via clipboard...');
-      await page.evaluate(async (value) => {
-        await navigator.clipboard.writeText(value);
-      }, text);
-      await page.keyboard.press('Control+V');
-      pasted = true;
-    } catch (error) {
-      console.warn('[Claude] Clipboard paste failed, using fallback:', error.message);
-    }
-
-    if (!pasted) {
-      console.log('[Claude] Applying fallback message insertion...');
-      await setComposerText(page, text);
-    }
+    console.log('[Claude] Applying direct message insertion...');
+    await setComposerText(page, text);
 
     await sleep(1000);
     await ensureComposerHasPrompt(page, text);
@@ -1970,12 +2076,68 @@ async function sendMessage(page, text) {
     console.log('[Claude] Looking for send button...');
     await submitPrompt(page, text);
     await sleep(1200);
+    const submitErrorMessage = await detectClaudeConnectionError(page, { includeBody: false });
+    if (submitErrorMessage) {
+      throw createClaudeConnectionError(submitErrorMessage);
+    }
     await scrollConversationToBottom(page);
     return responseBaseline;
   } catch (error) {
     console.warn('[Claude] sendMessage failed:', error.message);
     throw error;
   }
+}
+
+async function waitForVisibleChatInput(page, timeoutMs = 60000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const connectionErrorMessage = await detectClaudeConnectionError(page, { includeBody: false });
+    if (connectionErrorMessage) {
+      if (isClaudeTooManyChatsMessage(connectionErrorMessage)) {
+        await dismissTooManyChatsAlert(page);
+      } else {
+        throw createClaudeConnectionError(connectionErrorMessage);
+      }
+    }
+
+    const input = await findVisibleChatInput(page);
+    if (input) {
+      return input;
+    }
+
+    await closeTransientClaudeUi(page).catch(() => {});
+    await scrollConversationToBottom(page).catch(() => {});
+    await sleep(1500);
+  }
+
+  throw createClaudeInputNotReadyError('Chat input not found after waiting for Claude composer.');
+}
+
+async function waitForClaudeReadyToSend(page, timeoutMs = 120000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const connectionErrorMessage = await detectClaudeConnectionError(page, { includeBody: false });
+    if (connectionErrorMessage) {
+      if (isClaudeTooManyChatsMessage(connectionErrorMessage)) {
+        await dismissTooManyChatsAlert(page);
+      } else {
+        throw createClaudeConnectionError(connectionErrorMessage);
+      }
+    }
+
+    const controlState = await getGenerationControlState(page);
+    if (!controlState.stopVisible && controlState.composerReady) {
+      return;
+    }
+
+    await sleep(2000);
+  }
+
+  throw createClaudeConnectionError(
+    'Claude is still busy and the composer is not ready for a new message.'
+  );
 }
 
 async function hasStopGenerating(page) {
@@ -2188,6 +2350,178 @@ async function getVisibleArtifactSignature(page) {
   }
 }
 
+function getExpectedArtifactTerms(options = {}) {
+  const stepNumber = Number(options.stepNumber || 0);
+
+  if (stepNumber >= 8) {
+    return [
+      'final_corrected_screenplay',
+      'final corrected screenplay',
+      'final',
+      'corrected',
+      '.txt',
+      'this block is not supported',
+    ];
+  }
+
+  if (stepNumber === 7) {
+    return [
+      'complete_screenplay_draft',
+      'complete screenplay draft',
+      'complete',
+      'draft',
+      '.txt',
+      'this block is not supported',
+    ];
+  }
+
+  return ['.txt', 'artifact', 'this block is not supported'];
+}
+
+async function openLatestArtifactFromConversation(page, options = {}) {
+  const terms = getExpectedArtifactTerms(options);
+
+  try {
+    const result = await page.evaluate((searchTerms) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const lowerTerms = searchTerms.map((term) => normalize(term).toLowerCase()).filter(Boolean);
+      const isVisible = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          Number(style.opacity || 1) > 0
+        );
+      };
+      const getText = (element) => normalize([
+        element.innerText || element.textContent || '',
+        element.getAttribute('aria-label') || '',
+        element.getAttribute('title') || '',
+        element.getAttribute('href') || '',
+      ].join(' '));
+      const getComposerTop = () => {
+        const composers = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+          .filter((element) => isVisible(element));
+        const composer = composers[composers.length - 1];
+
+        return composer ? composer.getBoundingClientRect().top : Number.POSITIVE_INFINITY;
+      };
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1600;
+      const composerTop = getComposerTop();
+      const selectors = [
+        'main a',
+        'main button',
+        'main [role="button"]',
+        'main [tabindex]',
+        'main div',
+        'main span',
+      ];
+      const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
+        .filter((element) => {
+          if (!isVisible(element) || element.closest('[contenteditable="true"], nav, header, footer, script, style')) {
+            return false;
+          }
+
+          const rect = element.getBoundingClientRect();
+          if (rect.bottom <= 0 || rect.top >= composerTop - 4) {
+            return false;
+          }
+
+          if (rect.width < 24 || rect.height < 14 || rect.width > 820 || rect.height > 260) {
+            return false;
+          }
+
+          const text = getText(element);
+          if (!text || text.length > 700) {
+            return false;
+          }
+
+          if (/^(copy|share|download|publish|print|retry|try again|like|dislike|notify|dismiss)$/i.test(text)) {
+            return false;
+          }
+
+          const lowerText = text.toLowerCase();
+          return lowerTerms.some((term) => lowerText.includes(term)) || /\.txt\b/i.test(text);
+        })
+        .map((element) => {
+          const clickable = element.closest('a, button, [role="button"], [tabindex]') || element;
+          const rect = clickable.getBoundingClientRect();
+          const text = getText(clickable);
+          const lowerText = text.toLowerCase();
+          let score = 0;
+
+          for (const term of lowerTerms) {
+            if (term && lowerText.includes(term)) {
+              score += term === '.txt' ? 1200 : 5000;
+            }
+          }
+
+          if (/\.txt\b/i.test(text)) {
+            score += 1800;
+          }
+
+          // Prefer the most recent artifact card in the chat, near the composer.
+          score += Math.min(rect.bottom, composerTop) * 4;
+          score += Math.max(0, 500 - text.length);
+
+          // De-prioritize already-open right side panels. We want the latest chat card.
+          if (rect.left > viewportWidth * 0.58) {
+            score -= 3500;
+          }
+
+          if (clickable.matches('a, button, [role="button"]')) {
+            score += 700;
+          }
+
+          return {
+            element,
+            clickable,
+            score,
+            text,
+            top: rect.top,
+            left: rect.left,
+          };
+        })
+        .filter(({ clickable }) => isVisible(clickable))
+        .sort((a, b) => b.score - a.score);
+
+      const target = candidates[0];
+      if (!target) {
+        return { clicked: false, label: '' };
+      }
+
+      target.clickable.scrollIntoView({ block: 'center', inline: 'center' });
+      target.clickable.click();
+
+      return {
+        clicked: true,
+        label: target.text.slice(0, 180),
+        top: target.top,
+        left: target.left,
+      };
+    }, terms);
+
+    if (result?.clicked) {
+      console.log('[Claude] Opened latest artifact candidate:', result.label);
+      await sleep(1200);
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.warn('[Claude] Failed to open latest artifact candidate:', error.message);
+    return false;
+  }
+}
+
 async function findArtifactCopyButton(page) {
   const buttons = page
     .locator('button, [role="button"]')
@@ -2276,6 +2610,7 @@ async function tryCopyArtifactText(page, options = {}) {
       ) {
         return {
           source: 'artifact-copy',
+          fileName: options.expectedFileName || `step-${options.stepNumber || 'artifact'}-artifact.txt`,
           text: clipboardText,
         };
       }
@@ -2382,6 +2717,7 @@ async function tryDownloadArtifactText(page, options = {}) {
 
     return {
       source: 'artifact-download',
+      fileName: safeName || 'claude-artifact.txt',
       text,
       path: savedPath,
     };
@@ -2393,10 +2729,11 @@ async function tryDownloadArtifactText(page, options = {}) {
 
 async function extractClaudeArtifactText(page, options = {}) {
   const baselineSignature = options.baselineArtifactSignature || '';
-  const currentSignature = await getVisibleArtifactSignature(page);
   const chatText = String(options.chatText || '');
   const responseMentionsArtifact =
-    /artifact|txt|download|attached|saved|created.{0,60}file|generated.{0,60}file|file.{0,60}(?:created|saved|attached|generated)|t(?:a|\u1ea1)o file|d(?:a|\u00e3) t(?:a|\u1ea1)o/i.test(chatText);
+    /artifact|txt|download|attached|saved|created.{0,60}file|generated.{0,60}file|file.{0,60}(?:created|saved|attached|generated)|this block is not supported on your current device yet|t(?:a|\u1ea1)o file|d(?:a|\u00e3) t(?:a|\u1ea1)o/i.test(chatText);
+  const openedLatestArtifact = await openLatestArtifactFromConversation(page, options);
+  const currentSignature = await getVisibleArtifactSignature(page);
 
   if (!currentSignature) {
     return null;
@@ -2407,10 +2744,13 @@ async function extractClaudeArtifactText(page, options = {}) {
     return null;
   }
 
-  const copyResult = await tryCopyArtifactText(page, options);
-  if (copyResult) {
-    console.log('[Claude] Extracted Claude artifact via Copy. Length:', copyResult.text.length);
-    return copyResult;
+  if (baselineSignature && currentSignature === baselineSignature && responseMentionsArtifact) {
+    console.warn(
+      openedLatestArtifact
+        ? '[Claude] Latest artifact candidate opened, but visible artifact signature is still unchanged. Refusing to copy a stale artifact.'
+        : '[Claude] Claude mentioned a file, but no newer artifact panel was opened. Refusing to copy a stale artifact.'
+    );
+    return null;
   }
 
   const downloadResult = await tryDownloadArtifactText(page, options);
@@ -2420,6 +2760,12 @@ async function extractClaudeArtifactText(page, options = {}) {
       downloadResult.text.length
     );
     return downloadResult;
+  }
+
+  const copyResult = await tryCopyArtifactText(page, options);
+  if (copyResult) {
+    console.log('[Claude] Extracted Claude artifact via Copy. Length:', copyResult.text.length);
+    return copyResult;
   }
 
   return null;
@@ -2434,9 +2780,34 @@ async function findContinueGeneratingButton(page) {
   ]);
 }
 
-async function detectClaudeConnectionError(page) {
+async function dismissTooManyChatsAlert(page) {
   try {
-    return await page.evaluate((patterns) => {
+    const alert = page
+      .locator('[role="alert"], [role="status"], [aria-live], [data-testid*="toast" i], [class*="toast" i]')
+      .filter({ hasText: /Looks like you have too many chats going/i })
+      .first();
+
+    if (!await isLocatorVisible(alert, 500)) {
+      return false;
+    }
+
+    const closeButton = alert.locator(
+      'button[aria-label*="close" i], button[title*="close" i], button'
+    ).last();
+
+    if (await isLocatorVisible(closeButton, 500)) {
+      await closeButton.click({ timeout: 1000 }).catch(() => {});
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectClaudeConnectionError(page, options = {}) {
+  try {
+    return await page.evaluate(({ patterns, includeBody }) => {
       const regexes = patterns.map((pattern) => new RegExp(pattern.source, pattern.flags));
       const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const isVisible = (element) => {
@@ -2473,7 +2844,7 @@ async function detectClaudeConnectionError(page) {
         .filter(Boolean);
 
       const bodyText = normalize(document.body?.innerText || '');
-      if (bodyText.length < 20000) {
+      if (includeBody && bodyText.length < 20000) {
         visibleMessages.push(bodyText);
       }
 
@@ -2489,10 +2860,13 @@ async function detectClaudeConnectionError(page) {
       }
 
       return '';
-    }, CLAUDE_CONNECTION_ERROR_PATTERNS.map((pattern) => ({
-      source: pattern.source,
-      flags: pattern.flags,
-    })));
+    }, {
+      patterns: CLAUDE_CONNECTION_ERROR_PATTERNS.map((pattern) => ({
+        source: pattern.source,
+        flags: pattern.flags,
+      })),
+      includeBody: options.includeBody !== false,
+    });
   } catch {
     return '';
   }
@@ -4062,7 +4436,7 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
 
   while (elapsed < maxWait) {
     try {
-      const connectionErrorMessage = await detectClaudeConnectionError(page);
+      const connectionErrorMessage = await detectClaudeConnectionError(page, { includeBody: false });
       if (connectionErrorMessage) {
         throw createClaudeConnectionError(connectionErrorMessage);
       }
@@ -4137,6 +4511,10 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
       await scrollConversationToBottom(page);
       const currentResponse = await readCurrentResponse();
       const currentNewText = currentResponse.text;
+      const responseErrorMessage = getClaudeConnectionErrorMatch(currentNewText);
+      if (responseErrorMessage) {
+        throw createClaudeConnectionError(responseErrorMessage);
+      }
 
       if (
         currentNewText.length >= MIN_PARTIAL_RESPONSE_CHARS &&

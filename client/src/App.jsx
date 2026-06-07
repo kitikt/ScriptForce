@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
 import {
   Check,
+  ChevronDown,
   Gauge,
   ListPlus,
   Pencil,
@@ -27,12 +28,12 @@ const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   (window.location.port === '5173' ? 'http://localhost:3001' : window.location.origin)
 const SOCKET_URL = API_BASE_URL
-const DEFAULT_MAX_ACTIVE_PIPELINES = 2
+const DEFAULT_MAX_ACTIVE_PIPELINES = 0
 
 const STEP_DEFINITIONS = [
-  { stepNumber: 1, name: 'Phân tích kịch bản gốc' },
-  { stepNumber: 2, name: 'Viết outline 3 phần' },
-  { stepNumber: 3, name: 'Đánh giá và cải thiện outline' },
+  { stepNumber: 1, name: 'Bước 1' },
+  { stepNumber: 2, name: 'Bước 2' },
+  { stepNumber: 3, name: 'Bước 3' },
   { stepNumber: 4, name: 'Bước 5: Viết Part 1' },
   { stepNumber: 5, name: 'Bước 6: Viết Part 2' },
   { stepNumber: 6, name: 'Bước 7: Viết Part 3' },
@@ -78,7 +79,7 @@ function isActivePipeline(pipeline) {
 }
 
 function getPipelineTitle(pipeline) {
-  return pipeline?.config?.chatName || 'Pipeline chưa đặt tên'
+  return pipeline?.config?.chatName || 'Pipeline'
 }
 
 function getPipelineStatusLabel(status) {
@@ -115,6 +116,13 @@ function createPipelineFromJob(job) {
 }
 
 function getPipelineStepDefinitions(pipeline) {
+  if (Array.isArray(pipeline?.config?.promptSteps) && pipeline.config.promptSteps.length > 0) {
+    return pipeline.config.promptSteps.map((step, index) => ({
+      stepNumber: step.stepNumber || index + 1,
+      name: step.name || `Bước ${index + 1}`,
+    }))
+  }
+
   return [
     ...STEP_DEFINITIONS,
     ...(pipeline?.config?.customPromptSteps || []).map((step) => ({
@@ -468,6 +476,44 @@ function AccountPanel({
   )
 }
 
+function SidebarAccountSwitcher(props) {
+  const [expanded, setExpanded] = useState(false)
+  const profiles = props.profilesState?.profiles || []
+  const activeProfile = profiles.find((profile) => profile.isActive)
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        className={styles.accountCollapsedButton}
+        onClick={() => setExpanded(true)}
+        title="Mở danh sách tài khoản Claude"
+      >
+        <span>
+          <small>Tài khoản Claude</small>
+          <strong>{activeProfile?.label || 'Chưa chọn profile'}</strong>
+        </span>
+        <ChevronDown size={17} />
+      </button>
+    )
+  }
+
+  return (
+    <div className={styles.sidebarAccountExpanded}>
+      <button
+        type="button"
+        className={styles.accountCollapseTop}
+        onClick={() => setExpanded(false)}
+        title="Thu gọn danh sách tài khoản Claude"
+      >
+        <span>Thu gọn tài khoản</span>
+        <ChevronDown size={17} />
+      </button>
+      <AccountPanel {...props} />
+    </div>
+  )
+}
+
 function App() {
   const socketRef = useRef(null)
   const [phase, setPhase] = useState('init')
@@ -490,13 +536,18 @@ function App() {
     [pipelines]
   )
   const maxActivePipelines =
-    activeCapacity.maxActivePipelines || DEFAULT_MAX_ACTIVE_PIPELINES
+    activeCapacity.maxActivePipelines ?? DEFAULT_MAX_ACTIVE_PIPELINES
   const selectedPipeline =
     pipelines.find((pipeline) => pipeline.id === selectedPipelineId) || pipelines[0] || null
   const sortedSteps = selectedPipeline
     ? [...selectedPipeline.steps].sort((a, b) => getStepSortValue(a) - getStepSortValue(b))
     : []
-  const canStartPipeline = activePipelineCount < maxActivePipelines
+  const canStartPipeline =
+    maxActivePipelines <= 0 || activePipelineCount < maxActivePipelines
+  const pipelineCapacityLabel =
+    maxActivePipelines <= 0
+      ? `${activePipelineCount}/∞`
+      : `${activePipelineCount}/${maxActivePipelines}`
   const selectedStepDefinitions = selectedPipeline
     ? getPipelineStepDefinitions(selectedPipeline)
     : STEP_DEFINITIONS
@@ -663,11 +714,16 @@ function App() {
       )
     })
 
-    socket.on('step_complete', ({ pipelineId, stepNumber, stepName, result }) => {
+    socket.on('step_complete', ({ pipelineId, stepNumber, stepName, result, artifacts }) => {
       setPipelines((previous) =>
         updatePipeline(previous, pipelineId, (pipeline) => {
           const nextSteps = pipeline.steps.filter((step) => step.stepNumber !== stepNumber)
-          nextSteps.push({ stepNumber, stepName, result })
+          nextSteps.push({
+            stepNumber,
+            stepName,
+            result,
+            artifacts: Array.isArray(artifacts) ? artifacts : [],
+          })
           nextSteps.sort((a, b) => getStepSortValue(a) - getStepSortValue(b))
 
           return {
@@ -738,6 +794,32 @@ function App() {
         }))
       )
       setGlobalStatus(message)
+    })
+
+    socket.on('pipeline_retrying', ({ job, startStepNumber }) => {
+      if (!job?.pipelineId) {
+        return
+      }
+
+      setPipelines((previous) =>
+        updatePipeline(previous, job.pipelineId, (pipeline) => ({
+          ...pipeline,
+          status: job.status || 'starting',
+          currentStep: startStepNumber || job.currentStep || pipeline.currentStep,
+          errorStep: 0,
+          reviewStep: null,
+          statusMessage: `Dang thu lai tu buoc ${startStepNumber || job.currentStep || pipeline.currentStep}.`,
+          logs: Array.isArray(job.logs) && job.logs.length > 0
+            ? job.logs
+            : [...pipeline.logs, createLogEntry(`Dang thu lai tu buoc ${startStepNumber || pipeline.currentStep}.`)],
+          finishedAt: null,
+        }))
+      )
+    })
+
+    socket.on('pipeline_deleted', ({ pipelineId }) => {
+      setPipelines((previous) => previous.filter((pipeline) => pipeline.id !== pipelineId))
+      setSelectedPipelineId((current) => (current === pipelineId ? null : current))
     })
 
     socket.on('error', (payload) => {
@@ -838,6 +920,59 @@ function App() {
         logs: [...pipeline.logs, createLogEntry('Client đã yêu cầu dừng pipeline.')],
       }))
     )
+  }
+
+  const handleRetryPipeline = (pipelineId) => {
+    socketRef.current?.emit('retry_pipeline', { pipelineId })
+    setPipelines((previous) =>
+      updatePipeline(previous, pipelineId, (pipeline) => ({
+        ...pipeline,
+        status: 'starting',
+        errorStep: 0,
+        reviewStep: null,
+        statusMessage: `Dang thu lai tu buoc ${pipeline.errorStep || pipeline.currentStep || 1}...`,
+        logs: [
+          ...pipeline.logs,
+          createLogEntry(`Client yeu cau thu lai tu buoc ${pipeline.errorStep || pipeline.currentStep || 1}.`),
+        ],
+        finishedAt: null,
+      }))
+    )
+  }
+
+  const handleResumePipeline = (pipelineId) => {
+    socketRef.current?.emit('resume_pipeline', { pipelineId })
+    setPipelines((previous) =>
+      updatePipeline(previous, pipelineId, (pipeline) => ({
+        ...pipeline,
+        status: 'starting',
+        errorStep: 0,
+        reviewStep: null,
+        statusMessage: `Dang tiep tuc tu buoc ${pipeline.currentStep || 1}...`,
+        logs: [
+          ...pipeline.logs,
+          createLogEntry(`Client yeu cau tiep tuc pipeline tu buoc ${pipeline.currentStep || 1}.`),
+        ],
+        finishedAt: null,
+      }))
+    )
+  }
+
+  const handleDeletePipeline = (pipelineId) => {
+    const pipeline = pipelines.find((candidate) => candidate.id === pipelineId)
+    const confirmed = window.confirm(
+      isActivePipeline(pipeline)
+        ? 'Pipeline nay dang chay. Dung va xoa khoi danh sach?'
+        : 'Xoa pipeline nay khoi danh sach ben trai?'
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    socketRef.current?.emit('delete_pipeline', { pipelineId })
+    setPipelines((previous) => previous.filter((candidate) => candidate.id !== pipelineId))
+    setSelectedPipelineId((current) => (current === pipelineId ? null : current))
   }
 
   const clearReviewState = (pipelineId, statusMessage) => {
@@ -996,7 +1131,7 @@ function App() {
                   <h2>Hàng pipeline</h2>
                 </div>
                 <span className={styles.capacityBadge}>
-                  {activePipelineCount}/{maxActivePipelines}
+                  {pipelineCapacityLabel}
                 </span>
               </div>
 
@@ -1011,7 +1146,15 @@ function App() {
               </button>
 
               <div className={styles.sidebarCompactGrid}>
-                <AccountCompactPanel profilesState={profilesState} error={profileError} />
+                <SidebarAccountSwitcher
+                  profilesState={profilesState}
+                  error={profileError}
+                  activePipelineCount={activePipelineCount}
+                  onCreate={handleCreateProfile}
+                  onSwitch={handleSwitchProfile}
+                  onRename={handleRenameProfile}
+                  onDelete={handleDeleteProfile}
+                />
                 <UsageCompactPanel
                   usage={usageSnapshot}
                   error={usageError}
@@ -1027,25 +1170,37 @@ function App() {
                   </div>
                 ) : (
                   pipelines.map((pipeline) => (
-                    <button
+                    <div
                       key={pipeline.id}
-                      type="button"
-                      className={`${styles.pipelineCard} ${
-                        pipeline.id === selectedPipeline?.id ? styles.pipelineCardActive : ''
+                      className={`${styles.pipelineRow} ${
+                        pipeline.id === selectedPipeline?.id ? styles.pipelineRowActive : ''
                       }`}
-                      onClick={() => {
-                        setSelectedPipelineId(pipeline.id)
-                        setShowConfig(false)
-                      }}
                     >
-                      <span className={styles.pipelineName}>{getPipelineTitle(pipeline)}</span>
-                      <span className={`${styles.pipelineStatus} ${styles[pipeline.status] || ''}`}>
-                        {getPipelineStatusLabel(pipeline.status)}
-                      </span>
-                      <span className={styles.pipelineMeta}>
-                        Bước {pipeline.currentStep || 0}/{getPipelineStepDefinitions(pipeline).length}
-                      </span>
-                    </button>
+                      <button
+                        type="button"
+                        className={styles.pipelineCard}
+                        onClick={() => {
+                          setSelectedPipelineId(pipeline.id)
+                          setShowConfig(false)
+                        }}
+                      >
+                        <span className={styles.pipelineName}>{getPipelineTitle(pipeline)}</span>
+                        <span className={`${styles.pipelineStatus} ${styles[pipeline.status] || ''}`}>
+                          {getPipelineStatusLabel(pipeline.status)}
+                        </span>
+                        <span className={styles.pipelineMeta}>
+                          Bước {pipeline.currentStep || 0}/{getPipelineStepDefinitions(pipeline).length}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.pipelineDeleteButton}
+                        onClick={() => handleDeletePipeline(pipeline.id)}
+                        title="Xóa pipeline khỏi danh sách"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -1060,7 +1215,7 @@ function App() {
                       <h2>Tạo pipeline mới</h2>
                     </div>
                     <span className={styles.detailHint}>
-                      Đang chạy {activePipelineCount}/{maxActivePipelines}
+                      Đang chạy {pipelineCapacityLabel}
                     </span>
                   </div>
                   <ConfigPanel projects={projects} onStart={handleStartPipeline} />
@@ -1081,6 +1236,26 @@ function App() {
                         >
                           <Square size={14} />
                           <span>Dừng</span>
+                        </button>
+                      )}
+                      {selectedPipeline.status === 'error' && selectedPipeline.errorStep > 0 && (
+                        <button
+                          type="button"
+                          className={styles.secondaryButton}
+                          onClick={() => handleRetryPipeline(selectedPipeline.id)}
+                        >
+                          <RefreshCw size={14} />
+                          <span>Thu lai buoc loi</span>
+                        </button>
+                      )}
+                      {selectedPipeline.status === 'stopped' && (
+                        <button
+                          type="button"
+                          className={styles.secondaryButton}
+                          onClick={() => handleResumePipeline(selectedPipeline.id)}
+                        >
+                          <RefreshCw size={14} />
+                          <span>Tiếp tục</span>
                         </button>
                       )}
                       {sortedSteps.length > 0 && (
@@ -1138,6 +1313,7 @@ function App() {
                             stepNumber={step.stepNumber}
                             stepName={step.stepName}
                             result={step.result}
+                            artifacts={step.artifacts}
                           />
                         ))}
                       </div>

@@ -1,4 +1,7 @@
-const { launchBrowser, waitForLogin } = require('./browser');
+const {
+  launchBrowser,
+  waitForLogin,
+} = require('./browser');
 const { createClaudeWebProvider } = require('./providers/claudeWebProvider');
 const { STEPS } = require('../prompts/templates');
 
@@ -19,11 +22,99 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+class PipelineStoppedError extends Error {
+  constructor(message = 'Pipeline da duoc dung boi nguoi dung.') {
+    super(message);
+    this.name = 'PipelineStoppedError';
+    this.code = 'PIPELINE_STOPPED';
+  }
+}
+
+function isPipelineStoppedError(error) {
+  return error?.code === 'PIPELINE_STOPPED' || error?.name === 'PipelineStoppedError';
+}
+
+function isStopRequested(runtime = {}) {
+  return typeof runtime.shouldStop === 'function' && runtime.shouldStop();
+}
+
+function throwIfStopped(runtime = {}) {
+  if (isStopRequested(runtime)) {
+    throw new PipelineStoppedError();
+  }
+}
+
+async function sleepUntil(ms, runtime = {}) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < ms) {
+    throwIfStopped(runtime);
+    await sleep(Math.min(250, ms - (Date.now() - startedAt)));
+  }
+
+  throwIfStopped(runtime);
+}
+
 function getMinResponseCharsForStep(stepNumber) {
   return MIN_RESPONSE_CHARS_BY_STEP[stepNumber] || 500;
 }
 
+function normalizeStepResponse(response) {
+  if (response && typeof response === 'object' && !Array.isArray(response)) {
+    return {
+      text: String(response.text || ''),
+      artifacts: Array.isArray(response.artifacts) ? response.artifacts : [],
+    };
+  }
+
+  return {
+    text: String(response || ''),
+    artifacts: [],
+  };
+}
+
+function applyOriginalScriptToPrompt(prompt, originalScript, options = {}) {
+  const sourcePrompt = String(prompt || '');
+  const script = String(originalScript || '').trim();
+  const hasOriginalScriptToken = sourcePrompt.includes('{{originalScript}}');
+  const promptWithTokenValue = sourcePrompt.replaceAll('{{originalScript}}', script);
+
+  if (!options.appendWhenMissing || hasOriginalScriptToken || !script) {
+    return promptWithTokenValue;
+  }
+
+  return `${promptWithTokenValue}\n\nKịch bản gốc:\n${script}`;
+}
+
 function getPipelineSteps(config) {
+  const configuredSteps = Array.isArray(config.promptSteps)
+    ? config.promptSteps
+        .map((step, index) => {
+          const stepNumber = Number(step.stepNumber) || index + 1;
+          const name = String(step.name || `Bước ${stepNumber}`).trim();
+          const prompt = String(step.prompt || '').trim();
+
+          if (!prompt) {
+            return null;
+          }
+
+          return {
+            stepNumber,
+            name,
+            buildPrompt(originalScript) {
+              return applyOriginalScriptToPrompt(prompt, originalScript, {
+                appendWhenMissing: index === 0,
+              });
+            },
+          };
+        })
+        .filter(Boolean)
+    : [];
+
+  if (configuredSteps.length > 0) {
+    return configuredSteps;
+  }
+
   const customSteps = Array.isArray(config.customPromptSteps)
     ? config.customPromptSteps
         .map((step, index) => {
@@ -39,7 +130,7 @@ function getPipelineSteps(config) {
             stepNumber,
             name,
             buildPrompt(originalScript) {
-              return prompt.replaceAll('{{originalScript}}', originalScript);
+              return applyOriginalScriptToPrompt(prompt, originalScript);
             },
           };
         })
@@ -64,15 +155,22 @@ function buildPromptForStep(step, config) {
   }
 
   return {
-    prompt: override.replaceAll('{{originalScript}}', config.originalScript),
+    prompt: applyOriginalScriptToPrompt(override, config.originalScript, {
+      appendWhenMissing: step.stepNumber === 1,
+    }),
     source: 'custom',
   };
 }
 
-async function randomStepDelay() {
-  const delayMs = Math.floor(Math.random() * (15000 - 5000 + 1)) + 5000;
+async function randomStepDelay(runtime = {}, options = {}) {
+  const stepNumber = Number(options.stepNumber || 0);
+  const hasArtifact = Array.isArray(options.artifacts) && options.artifacts.length > 0;
+  const longCooldown = stepNumber >= 7 || hasArtifact;
+  const minMs = longCooldown ? 45000 : 5000;
+  const maxMs = longCooldown ? 75000 : 15000;
+  const delayMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
   console.log(`[Pipeline] Waiting ${delayMs}ms before next step...`);
-  await sleep(delayMs);
+  await sleepUntil(delayMs, runtime);
 }
 
 function emitSocketEvent(socket, eventName, payload) {
@@ -169,15 +267,42 @@ function isClaudeTimeoutError(error) {
   return /timed out waiting for claude response/i.test(message);
 }
 
+function isClaudeCodeExecutionBusyError(error) {
+  const message = error?.message || '';
+  return /another response is already running/i.test(message) ||
+    /code execution environment/i.test(message) ||
+    /wait for it to finish before trying again/i.test(message);
+}
+
+function isClaudeTooManyChatsError(error) {
+  return error?.code === 'CLAUDE_TOO_MANY_CHATS' ||
+    /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i.test(
+      error?.message || ''
+    );
+}
+
 function isRetriableStepError(error) {
+  const message = error?.message || '';
+
   return (
     isClaudeTimeoutError(error) ||
     error?.code === 'CLAUDE_CONNECTION_ERROR' ||
-    error?.code === 'CLAUDE_RESPONSE_TOO_SHORT'
+    error?.code === 'CLAUDE_RESPONSE_TOO_SHORT' ||
+    error?.code === 'CLAUDE_INPUT_NOT_READY' ||
+    /chat input not found/i.test(message)
   );
 }
 
-async function recoverBeforeStepRetry(page, socket, pipelineId) {
+async function recoverBeforeStepRetry(page, socket, pipelineId, error) {
+  if (isClaudeCodeExecutionBusyError(error)) {
+    emitLog(
+      socket,
+      'Claude van dang khoa code execution cua chat nay. Dang cho 90 giay roi thu lai dung buoc hien tai.',
+      pipelineId
+    );
+    return;
+  }
+
   if (page && typeof page.recoverAfterStepError === 'function') {
     await page.recoverAfterStepError();
     emitLog(socket, 'Đã làm mới chat sau lỗi tạm thời. Sẽ chạy lại đúng bước hiện tại.', pipelineId);
@@ -187,13 +312,19 @@ async function recoverBeforeStepRetry(page, socket, pipelineId) {
   emitLog(socket, 'Sẽ chạy lại đúng bước hiện tại sau lỗi tạm thời.', pipelineId);
 }
 
+function getRetryDelayMs(error) {
+  return isClaudeCodeExecutionBusyError(error) ? 90000 : 3000;
+}
+
 async function executeStep(page, step, config, socket, runtime = {}) {
   const { stepNumber, name: stepName } = step;
   const { pipelineId } = runtime;
   let attempt = 0;
+  let tooManyChatsRetryCount = 0;
 
   while (attempt <= STEP_RETRY_LIMIT) {
     try {
+      throwIfStopped(runtime);
       ensurePageAvailable(page);
 
       if (attempt > 0) {
@@ -220,24 +351,47 @@ async function executeStep(page, step, config, socket, runtime = {}) {
       emitUrlLog(socket, page, pipelineId);
       const minResponseChars = getMinResponseCharsForStep(stepNumber);
       emitLog(socket, `Độ dài phản hồi ưu tiên cho bước ${stepNumber}: ${minResponseChars} ký tự`, pipelineId);
+      throwIfStopped(runtime);
       const response = await page.sendPrompt(prompt, {
         stepNumber,
         stepName,
         minResponseChars,
       });
+      throwIfStopped(runtime);
       emitLog(socket, 'Đã gửi tin nhắn và nhận phản hồi.', pipelineId);
       emitUrlLog(socket, page, pipelineId);
 
-      return response;
+      return normalizeStepResponse(response);
     } catch (error) {
+      if (isPipelineStoppedError(error) || isStopRequested(runtime)) {
+        throw new PipelineStoppedError();
+      }
+
+      if (isClaudeTooManyChatsError(error)) {
+        tooManyChatsRetryCount += 1;
+        const retryDelayMs = Math.floor(Math.random() * 1001) + 1000;
+        emitStatus(
+          socket,
+          `Claude dang gioi han chat. Dang gui lai buoc ${stepNumber} sau ${Math.round(retryDelayMs / 100) / 10} giay...`,
+          pipelineId
+        );
+        emitLog(
+          socket,
+          `Claude bao "Looks like you have too many chats going". Dang gui lai dung prompt buoc ${stepNumber}, lan ${tooManyChatsRetryCount}.`,
+          pipelineId
+        );
+        await sleepUntil(retryDelayMs, runtime);
+        continue;
+      }
+
       if (isRetriableStepError(error) && attempt < STEP_RETRY_LIMIT) {
         attempt += 1;
         console.warn(
           `[Pipeline] Retriable error on step ${stepNumber}, retrying attempt ${attempt}/${STEP_RETRY_LIMIT}: ${error.message}`
         );
         emitLog(socket, `Bước ${stepNumber} gặp lỗi tạm thời: ${error.message}`, pipelineId);
-        await recoverBeforeStepRetry(page, socket, pipelineId);
-        await sleep(3000);
+        await recoverBeforeStepRetry(page, socket, pipelineId, error);
+        await sleepUntil(getRetryDelayMs(error), runtime);
         continue;
       }
 
@@ -249,11 +403,11 @@ async function executeStep(page, step, config, socket, runtime = {}) {
 async function initBrowser(socket, options = {}) {
   try {
     console.log('[Pipeline] Launching browser...');
-    emitLog(socket, 'Đang mở browser...');
+    emitLog(socket, 'Đang mở Chromium ở chế độ nền...');
     const { context, page } = await launchBrowser(options);
 
     console.log('[Pipeline] Waiting for manual login...');
-    emitLog(socket, 'Đang chờ bạn đăng nhập thủ công...');
+    emitLog(socket, 'Chromium đang chạy nền. Nếu cần đăng nhập, hãy bấm vào cửa sổ Chromium trên taskbar.');
     await waitForLogin(page);
 
     console.log('[Pipeline] Login complete, fetching projects...');
@@ -334,26 +488,36 @@ function waitForReviewAction(socket, pipelineId, shouldStop) {
   });
 }
 
+function emitPipelineStopped(socket, results, pipelineId) {
+  emitLog(socket, 'Pipeline da duoc dung theo yeu cau.', pipelineId);
+  emitSocketEvent(socket, 'pipeline_stopped', withPipelineId({ results }, pipelineId));
+}
+
 async function runPipeline(page, config, socket, runtime = {}) {
   const provider =
     page && typeof page.sendPrompt === 'function'
       ? page
       : createClaudeWebProvider(page);
-  const results = {};
+  const results = { ...(runtime.initialResults || {}) };
   let semiAutoEnabled = Boolean(config.semiAuto);
   const { pipelineId, shouldStop = () => false } = runtime;
   const pipelineSteps = getPipelineSteps(config);
+  const startStepNumber = Number(runtime.startStepNumber || 0);
+  const skipSetup = Boolean(runtime.skipSetup);
 
   try {
+    throwIfStopped(runtime);
     ensurePageAvailable(provider);
     console.log('[Pipeline] Starting pipeline with config:', config);
     emitLog(socket, 'Pipeline đã bắt đầu.', pipelineId);
     emitUrlLog(socket, provider, pipelineId);
 
+    if (!skipSetup) {
     emitStatus(socket, 'Navigating to project...', pipelineId);
     emitLog(socket, `Đang mở project: ${config.projectUrl}`, pipelineId);
     emitUrlLog(socket, provider, pipelineId);
     await provider.navigateToProject(config.projectUrl);
+    throwIfStopped(runtime);
     emitLog(socket, 'Đã mở project xong.', pipelineId);
     emitUrlLog(socket, provider, pipelineId);
 
@@ -366,19 +530,27 @@ async function runPipeline(page, config, socket, runtime = {}) {
     );
     emitUrlLog(socket, provider, pipelineId);
     const selectedModel = await provider.selectModel(config.modelName, { adaptiveThinking });
+    throwIfStopped(runtime);
     if (!selectedModel) {
       throw new Error(`Khong chon duoc model ${config.modelName}. Pipeline da dung de tranh chay sai model.`);
     }
     emitLog(socket, 'Đã chọn model xong.', pipelineId);
     emitUrlLog(socket, provider, pipelineId);
+    } else {
+      emitLog(socket, `Dang thu lai pipeline tu buoc ${startStepNumber || 1} trong chat hien tai.`, pipelineId);
+      emitUrlLog(socket, provider, pipelineId);
+    }
 
     for (const step of pipelineSteps) {
       const { stepNumber, name: stepName } = step;
 
+      if (startStepNumber && stepNumber < startStepNumber) {
+        continue;
+      }
+
       try {
         if (shouldStop()) {
-          emitLog(socket, 'Pipeline đã được người dùng dừng.', pipelineId);
-          emitSocketEvent(socket, 'pipeline_stopped', withPipelineId({ results }, pipelineId));
+          emitPipelineStopped(socket, results, pipelineId);
           return results;
         }
 
@@ -387,17 +559,20 @@ async function runPipeline(page, config, socket, runtime = {}) {
         emitUrlLog(socket, provider, pipelineId);
         emitSocketEvent(socket, 'step_start', withPipelineId({ stepNumber, stepName }, pipelineId));
 
-        const result = await executeStep(provider, step, config, socket, runtime);
+        const stepResponse = await executeStep(provider, step, config, socket, runtime);
+        const result = stepResponse.text;
+        const artifacts = stepResponse.artifacts;
         results[stepNumber] = {
           stepNumber,
           stepName,
           result,
+          artifacts,
         };
 
         emitSocketEvent(
           socket,
           'step_complete',
-          withPipelineId({ stepNumber, stepName, result }, pipelineId)
+          withPipelineId({ stepNumber, stepName, result, artifacts }, pipelineId)
         );
         emitLog(socket, `Bước ${stepNumber} đã hoàn thành: ${stepName}`, pipelineId);
         emitUrlLog(socket, provider, pipelineId);
@@ -407,6 +582,7 @@ async function runPipeline(page, config, socket, runtime = {}) {
           emitLog(socket, `Đang đổi tên chat thành: ${config.chatName}`, pipelineId);
           emitUrlLog(socket, provider, pipelineId);
           const chatRenamed = await provider.renameChat(config.chatName);
+          throwIfStopped(runtime);
           emitLog(
             socket,
             chatRenamed
@@ -430,28 +606,32 @@ async function runPipeline(page, config, socket, runtime = {}) {
           }
 
           if (userAction.action === 'stop') {
-            emitLog(socket, 'Pipeline đã được dừng trong lúc kiểm tra.', pipelineId);
-            emitSocketEvent(socket, 'pipeline_stopped', withPipelineId({ results }, pipelineId));
+            emitPipelineStopped(socket, results, pipelineId);
             return results;
           }
 
           if (userAction.action === 'edit') {
             emitLog(socket, 'Đang gửi yêu cầu chỉnh sửa: ' + userAction.message, pipelineId);
-            const editResponse = await provider.sendPrompt(userAction.message, {
+            throwIfStopped(runtime);
+            const editStepResponse = normalizeStepResponse(await provider.sendPrompt(userAction.message, {
               stepNumber,
               stepName,
               minResponseChars: getMinResponseCharsForStep(stepNumber),
-            });
+            }));
+            throwIfStopped(runtime);
+            const editResponse = editStepResponse.text;
+            const editArtifacts = editStepResponse.artifacts;
             emitLog(socket, 'Đã xử lý chỉnh sửa. Độ dài phản hồi: ' + editResponse.length, pipelineId);
             results[stepNumber] = {
               stepNumber,
               stepName,
               result: editResponse,
+              artifacts: editArtifacts,
             };
             emitSocketEvent(
               socket,
               'step_complete',
-              withPipelineId({ stepNumber, stepName, result: editResponse }, pipelineId)
+              withPipelineId({ stepNumber, stepName, result: editResponse, artifacts: editArtifacts }, pipelineId)
             );
             continue;
           }
@@ -464,20 +644,25 @@ async function runPipeline(page, config, socket, runtime = {}) {
               `${redoSource === 'custom' ? 'Đang dùng prompt đã chỉnh sửa' : 'Đang dùng prompt mặc định'} để chạy lại bước ${stepNumber}. Độ dài prompt: ${redoPrompt.length}`,
               pipelineId
             );
-            const redoResponse = await provider.sendPrompt(redoPrompt, {
+            throwIfStopped(runtime);
+            const redoStepResponse = normalizeStepResponse(await provider.sendPrompt(redoPrompt, {
               stepNumber,
               stepName,
               minResponseChars: getMinResponseCharsForStep(stepNumber),
-            });
+            }));
+            throwIfStopped(runtime);
+            const redoResponse = redoStepResponse.text;
+            const redoArtifacts = redoStepResponse.artifacts;
             results[stepNumber] = {
               stepNumber,
               stepName,
               result: redoResponse,
+              artifacts: redoArtifacts,
             };
             emitSocketEvent(
               socket,
               'step_complete',
-              withPipelineId({ stepNumber, stepName, result: redoResponse }, pipelineId)
+              withPipelineId({ stepNumber, stepName, result: redoResponse, artifacts: redoArtifacts }, pipelineId)
             );
             emitLog(socket, 'Đã chạy lại xong bước ' + stepNumber, pipelineId);
             continue;
@@ -489,9 +674,17 @@ async function runPipeline(page, config, socket, runtime = {}) {
         if (stepNumber < pipelineSteps.length) {
           emitLog(socket, 'Đang chờ trước khi sang bước tiếp theo...', pipelineId);
           emitUrlLog(socket, provider, pipelineId);
-          await randomStepDelay();
+          await randomStepDelay(runtime, {
+            stepNumber,
+            artifacts,
+          });
         }
       } catch (error) {
+        if (isPipelineStoppedError(error) || shouldStop()) {
+          emitPipelineStopped(socket, results, pipelineId);
+          return results;
+        }
+
         console.error(`[Pipeline] Step ${stepNumber} failed:`, error);
         emitLog(socket, `Bước ${stepNumber} gặp lỗi: ${error.message}`, pipelineId);
         emitUrlLog(socket, provider, pipelineId);
@@ -517,6 +710,11 @@ async function runPipeline(page, config, socket, runtime = {}) {
 
     return results;
   } catch (error) {
+    if (isPipelineStoppedError(error) || shouldStop()) {
+      emitPipelineStopped(socket, results, pipelineId);
+      return results;
+    }
+
     console.error('[Pipeline] runPipeline failed:', error);
     throw error;
   }

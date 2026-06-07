@@ -80,7 +80,7 @@ async function createPersistentContext(userDataDir) {
     headless: false,
     viewport: null,
     args: [
-      '--start-maximized',
+      '--start-minimized',
       '--disable-blink-features=AutomationControlled',
     ],
     ignoreDefaultArgs: ['--enable-automation'],
@@ -115,7 +115,6 @@ async function selectAutomationPage(context) {
     }
   }
 
-  await page.bringToFront().catch(() => {});
   return page;
 }
 

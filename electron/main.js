@@ -4,15 +4,18 @@ const net = require('net');
 const path = require('path');
 
 const DEFAULT_SERVER_PORT = Number(process.env.PORT || 3001);
+const MIN_SPLASH_VISIBLE_MS = 4000;
 
 let mainWindow = null;
+let splashWindow = null;
 let serverPort = DEFAULT_SERVER_PORT;
 let serverUrl = `http://127.0.0.1:${serverPort}`;
+let splashShownAt = 0;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
-  app.quit();
+  app.exit(0);
 }
 
 app.on('second-instance', () => {
@@ -27,7 +30,7 @@ app.on('second-instance', () => {
   mainWindow.focus();
 });
 
-function isPortAvailable(port) {
+function canListenOn(port, host) {
   return new Promise((resolve) => {
     const server = net.createServer();
 
@@ -39,8 +42,15 @@ function isPortAvailable(port) {
       server.close(() => resolve(true));
     });
 
-    server.listen(port, '127.0.0.1');
+    server.listen(port, host);
   });
+}
+
+async function isPortAvailable(port) {
+  const ipv4Available = await canListenOn(port, '0.0.0.0');
+  const ipv6Available = await canListenOn(port, '::');
+
+  return ipv4Available && ipv6Available;
 }
 
 async function findAvailablePort(startPort) {
@@ -120,21 +130,77 @@ async function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
+    show: false,
   });
 
   await mainWindow.loadURL(serverUrl);
+
+  mainWindow.once('ready-to-show', async () => {
+    const elapsed = Date.now() - splashShownAt;
+    const remaining = Math.max(0, MIN_SPLASH_VISIBLE_MS - elapsed);
+
+    if (remaining > 0) {
+      await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.close();
+    }
+    splashWindow = null;
+    mainWindow.show();
+    mainWindow.focus();
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 }
 
+async function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 340,
+    height: 340,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    backgroundColor: '#00000000',
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  await splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+
+  splashWindow.once('ready-to-show', () => {
+    splashShownAt = Date.now();
+    splashWindow.show();
+  });
+
+  splashWindow.on('closed', () => {
+    splashWindow = null;
+  });
+}
+
 app.whenReady().then(async () => {
   try {
+    await createSplashWindow();
     await startServer();
     await waitForServer(serverUrl);
     await createMainWindow();
   } catch (error) {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.close();
+    }
+    splashWindow = null;
     dialog.showErrorBox(
       'ScriptForge không mở được',
       `Không thể khởi động ScriptForge.\n\nChi tiết: ${error.message}`
