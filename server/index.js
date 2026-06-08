@@ -6,12 +6,13 @@ const { randomUUID } = require('crypto');
 const { EventEmitter } = require('events');
 const { Server } = require('socket.io');
 
-const { initBrowser, runPipeline } = require('./automation/pipeline');
-const { waitForLogin } = require('./automation/browser');
+const { runPipeline } = require('./automation/pipeline');
+const { createProfileSessionManager } = require('./automation/profileSessionManager');
 const {
   createProfile,
   deleteProfile,
   getActiveProfile,
+  getProfile,
   getProfilesState,
   renameProfile,
   switchProfile,
@@ -109,10 +110,17 @@ function requestStopPipelineJob(job) {
       console.warn(`[Server] Could not close stopped pipeline page ${job.pipelineId}:`, error.message);
     });
   }
+  profileSessionManager.scheduleIdleClose(job.profileId);
 }
 
 function getActivePipelineCount() {
   return Array.from(pipelineJobs.values()).filter(isPipelineActive).length;
+}
+
+function getActivePipelineCountForProfile(profileId) {
+  return Array.from(pipelineJobs.values()).filter(
+    (job) => isPipelineActive(job) && job.profileId === profileId
+  ).length;
 }
 
 function hasActivePipelineLimit() {
@@ -124,6 +132,8 @@ function getPublicJob(job) {
     pipelineId: job.pipelineId,
     status: job.status,
     config: {
+      profileId: job.profileId || job.config.profileId || null,
+      profileLabel: job.profileLabel || job.config.profileLabel || '',
       templateId: job.config.templateId,
       templateName: job.config.templateName,
       chatName: job.config.chatName,
@@ -156,6 +166,8 @@ function getPublicJob(job) {
     }),
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
+    profileId: job.profileId || null,
+    profileLabel: job.profileLabel || '',
   };
 }
 
@@ -166,6 +178,7 @@ function emitPipelineSnapshot(socket) {
     jobs,
     activeCount: getActivePipelineCount(),
     maxActivePipelines: MAX_ACTIVE_PIPELINES,
+    profileSessions: profileSessionManager.getPublicSessions(),
   });
 }
 
@@ -325,6 +338,25 @@ function getClientErrorMessage(error) {
   return message;
 }
 
+const profileSessionManager = createProfileSessionManager({
+  io,
+  getClientErrorMessage,
+  hasActivePipelines: (profileId) => getActivePipelineCountForProfile(profileId) > 0,
+  onUnexpectedClose: (profileId) => {
+    for (const job of pipelineJobs.values()) {
+      if (job.profileId === profileId && isPipelineActive(job)) {
+        job.status = 'error';
+        job.statusMessage = 'Chromium cua tai khoan da bi dong.';
+        job.finishedAt = new Date().toISOString();
+        io.emit('pipeline_failed', {
+          pipelineId: job.pipelineId,
+          error: job.statusMessage,
+        });
+      }
+    }
+  },
+});
+
 async function emitExistingBrowserReady(socket) {
   const profileLabel = activeProfile?.label || 'Claude profile';
   socket.emit('status', `Browser đã kết nối. Đang dùng lại ${profileLabel}...`);
@@ -445,6 +477,15 @@ function createJobSocket(socket, job) {
 
       if (eventName === 'status') {
         job.statusMessage = typeof payload === 'string' ? payload : payload?.message || job.statusMessage;
+        if (
+          /đang chờ pipeline khác|đã hết usage|Claude vẫn có phản hồi khác đang chạy/i.test(
+            job.statusMessage
+          )
+        ) {
+          job.status = 'waiting';
+        } else if (job.status === 'waiting') {
+          job.status = 'running';
+        }
       }
 
       if (eventName === 'log') {
@@ -467,16 +508,6 @@ function createJobSocket(socket, job) {
 }
 
 async function startPipelineJob(socket, config) {
-  if (!isBrowserContextAlive(browserContext)) {
-    browserContext = null;
-    browserPage = null;
-    socket.emit('error', {
-      stepNumber: 0,
-      error: 'Browser chưa được khởi tạo hoặc đã bị đóng. Vui lòng kết nối browser trước.',
-    });
-    return;
-  }
-
   if (
     hasActivePipelineLimit() &&
     getActivePipelineCount() >= MAX_ACTIVE_PIPELINES
@@ -488,12 +519,19 @@ async function startPipelineJob(socket, config) {
     return;
   }
 
+  const requestedProfileId = config.profileId || (await getActiveProfile()).profile.id;
+  const { profile } = await getProfile(requestedProfileId);
+  const normalizedConfig = {
+    ...config,
+    profileId: profile.id,
+    profileLabel: profile.label,
+  };
   const pipelineId = randomUUID();
-  const page = await createPipelinePage(browserContext);
+  const page = await profileSessionManager.createPipelinePage(profile, socket);
   const job = {
     pipelineId,
     page,
-    config,
+    config: normalizedConfig,
     status: 'starting',
     currentStep: 0,
     errorStep: 0,
@@ -510,7 +548,8 @@ async function startPipelineJob(socket, config) {
     stopped: false,
     startedAt: new Date().toISOString(),
     finishedAt: null,
-    profileId: activeProfile?.id || null,
+    profileId: profile.id,
+    profileLabel: profile.label,
   };
 
   pipelineJobs.set(pipelineId, job);
@@ -522,7 +561,7 @@ async function startPipelineJob(socket, config) {
 
   const jobSocket = createJobSocket(socket, job);
 
-  runPipeline(page, config, jobSocket, {
+  runPipeline(page, normalizedConfig, jobSocket, {
     pipelineId,
     shouldStop: () => job.stopped,
   })
@@ -572,6 +611,7 @@ async function startPipelineJob(socket, config) {
         activeCount: getActivePipelineCount(),
         maxActivePipelines: MAX_ACTIVE_PIPELINES,
       });
+      profileSessionManager.scheduleIdleClose(job.profileId);
     });
 }
 
@@ -615,17 +655,6 @@ async function retryPipelineJob(socket, pipelineId, options = {}) {
     return;
   }
 
-  if (!isBrowserContextAlive(browserContext)) {
-    browserContext = null;
-    browserPage = null;
-    socket.emit('error', {
-      pipelineId,
-      stepNumber: job.errorStep || job.currentStep || 0,
-      error: 'Browser chua duoc khoi tao hoac da bi dong. Vui long ket noi browser truoc.',
-    });
-    return;
-  }
-
   if (
     hasActivePipelineLimit() &&
     getActivePipelineCount() >= MAX_ACTIVE_PIPELINES
@@ -649,8 +678,9 @@ async function retryPipelineJob(socket, pipelineId, options = {}) {
     return;
   }
 
+  const { profile } = await getProfile(job.profileId || job.config.profileId);
   await job.page?.close?.().catch(() => {});
-  const page = await createPipelinePage(browserContext);
+  const page = await profileSessionManager.createPipelinePage(profile, socket);
   job.page = page;
   job.status = 'starting';
   job.errorStep = 0;
@@ -734,6 +764,7 @@ async function retryPipelineJob(socket, pipelineId, options = {}) {
         activeCount: getActivePipelineCount(),
         maxActivePipelines: MAX_ACTIVE_PIPELINES,
       });
+      profileSessionManager.scheduleIdleClose(job.profileId);
     });
 }
 
@@ -811,12 +842,15 @@ io.on('connection', (socket) => {
     });
   });
   emitPipelineSnapshot(socket);
+  socket.emit('profile_sessions_snapshot', {
+    sessions: profileSessionManager.getPublicSessions(),
+  });
 
   socket.on('list_pipelines', () => {
     emitPipelineSnapshot(socket);
   });
 
-  socket.on('init_browser', async () => {
+  socket.on('init_browser_legacy', async () => {
     try {
       const { profile } = await loadActiveProfile();
       await emitProfiles(socket);
@@ -859,6 +893,29 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error('[Server] init_browser failed:', error);
       socket.emit('error', {
+        stepNumber: 0,
+        error: getClientErrorMessage(error),
+      });
+    }
+  });
+
+  socket.on('init_browser', async (payload = {}) => {
+    try {
+      const requestedProfileId = payload.profileId || (await getActiveProfile()).profile.id;
+      const { profile } = await getProfile(requestedProfileId);
+      socket.emit('status', `Dang ket noi Claude profile: ${profile.label}`);
+      const session = await profileSessionManager.connect(profile, socket);
+      await switchProfile(profile.id);
+      await emitProfiles(socket);
+      socket.emit('login_success', {
+        profileId: profile.id,
+        profileLabel: profile.label,
+        projects: session.projects,
+      });
+    } catch (error) {
+      console.error('[Server] init_browser failed:', error);
+      socket.emit('error', {
+        profileId: payload.profileId || null,
         stepNumber: 0,
         error: getClientErrorMessage(error),
       });
@@ -935,13 +992,12 @@ io.on('connection', (socket) => {
 
   socket.on('create_profile', async (payload = {}) => {
     try {
-      ensureNoActivePipelines();
       const { profile } = await createProfile(payload.label);
       activeProfile = profile;
-      await closeBrowserContext();
       await emitProfiles(socket);
       socket.emit('status', `Đã tạo Claude profile: ${profile.label}. Bấm Kết nối browser để đăng nhập.`);
       socket.emit('profile_ready_for_login', {
+        openConfig: true,
         profile: {
           id: profile.id,
           label: profile.label,
@@ -956,13 +1012,12 @@ io.on('connection', (socket) => {
 
   socket.on('switch_profile', async (payload = {}) => {
     try {
-      ensureNoActivePipelines();
       const { profile } = await switchProfile(payload.profileId);
       activeProfile = profile;
-      await closeBrowserContext();
       await emitProfiles(socket);
       socket.emit('status', `Đã chuyển sang Claude profile: ${profile.label}. Bấm Kết nối browser để sử dụng.`);
       socket.emit('profile_ready_for_login', {
+        openConfig: false,
         profile: {
           id: profile.id,
           label: profile.label,
@@ -988,7 +1043,10 @@ io.on('connection', (socket) => {
 
   socket.on('delete_profile', async (payload = {}) => {
     try {
-      ensureNoActivePipelines();
+      if (getActivePipelineCountForProfile(payload.profileId) > 0) {
+        throw new Error('Hay dung cac pipeline cua tai khoan nay truoc khi xoa.');
+      }
+      await profileSessionManager.remove(payload.profileId);
       await deleteProfile(payload.profileId);
       await emitProfiles(socket);
     } catch (error) {
@@ -998,15 +1056,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('request_usage', async () => {
+  socket.on('request_usage', async (payload = {}) => {
     try {
-      if (latestUsage) {
-        socket.emit('usage_update', latestUsage);
-      }
-
-      await refreshUsageNow();
+      const requestedProfileId = payload.profileId || (await getActiveProfile()).profile.id;
+      const { profile } = await getProfile(requestedProfileId);
+      await profileSessionManager.refreshUsage(profile, socket);
+      profileSessionManager.scheduleIdleClose(profile.id);
     } catch (error) {
       socket.emit('usage_error', {
+        profileId: payload.profileId || null,
         error: getClientErrorMessage(error),
       });
     }

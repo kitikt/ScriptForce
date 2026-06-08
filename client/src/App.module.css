@@ -674,6 +674,57 @@
   padding-right: 0.15rem;
 }
 
+.pipelineGroup {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.pipelineGroup + .pipelineGroup {
+  margin-top: 0.25rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid rgba(222, 204, 255, 0.12);
+}
+
+.pipelineGroupHeader {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 1.6rem;
+  padding: 0 0.2rem;
+}
+
+.pipelineGroupHeader strong {
+  overflow: hidden;
+  color: #e7dbff;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipelineGroupHeader small {
+  color: #8f9ab6;
+  font-size: 0.66rem;
+}
+
+.profileStatusDot {
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: #667085;
+  box-shadow: 0 0 0 3px rgba(102, 112, 133, 0.1);
+}
+
+.profileStatusConnected {
+  background: #34d399;
+  box-shadow: 0 0 12px rgba(52, 211, 153, 0.5);
+}
+
+.pipelineGroupList {
+  display: grid;
+  gap: 0.55rem;
+}
+
 .emptyPipelineList {
   display: flex;
   align-items: center;
@@ -755,6 +806,11 @@
 .review {
   background: rgba(196, 161, 255, 0.18);
   color: #c4a1ff;
+}
+
+.waiting {
+  background: rgba(234, 179, 8, 0.16);
+  color: #facc15;
 }
 
 .done {

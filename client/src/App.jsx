@@ -86,6 +86,7 @@ function getPipelineStatusLabel(status) {
   const labels = {
     starting: 'Đang khởi động',
     running: 'Đang chạy',
+    waiting: 'Đang chờ',
     review: 'Chờ kiểm tra',
     done: 'Hoàn tất',
     stopped: 'Đã dừng',
@@ -98,6 +99,8 @@ function getPipelineStatusLabel(status) {
 function createPipelineFromJob(job) {
   return {
     id: job.pipelineId,
+    profileId: job.profileId || job.config?.profileId || null,
+    profileLabel: job.profileLabel || job.config?.profileLabel || '',
     config: job.config || {},
     status: job.status || 'starting',
     statusMessage: job.statusMessage || 'Pipeline đã được đưa vào hàng chạy.',
@@ -300,36 +303,9 @@ function UsageCompactPanel({ usage, error, onRefresh }) {
   )
 }
 
-function AccountCompactPanel({ profilesState, error }) {
-  const profiles = profilesState?.profiles || []
-  const activeProfile = profiles.find((profile) => profile.isActive)
-
-  return (
-    <section className={styles.compactPanel}>
-      <header className={styles.compactHeader}>
-        <div>
-          <p className={styles.eyebrow}>Tài khoản</p>
-          <h3 title={activeProfile?.label || 'Chưa chọn profile'}>
-            {activeProfile?.label || 'Chưa chọn profile'}
-          </h3>
-        </div>
-        <UserRound size={17} />
-      </header>
-      {error ? (
-        <p className={styles.compactError}>{error}</p>
-      ) : (
-        <p className={styles.compactMeta}>
-          {profiles.length > 0 ? `${profiles.length} profile Claude` : 'Chưa có profile'}
-        </p>
-      )}
-    </section>
-  )
-}
-
 function AccountPanel({
   profilesState,
   error,
-  activePipelineCount,
   onCreate,
   onSwitch,
   onRename,
@@ -340,7 +316,6 @@ function AccountPanel({
   const [editingLabel, setEditingLabel] = useState('')
   const profiles = profilesState?.profiles || []
   const activeProfile = profiles.find((profile) => profile.isActive)
-  const isSwitchLocked = activePipelineCount > 0
 
   const handleCreate = () => {
     const label = newProfileLabel.trim()
@@ -374,12 +349,6 @@ function AccountPanel({
       </header>
 
       {error && <p className={styles.accountError}>{error}</p>}
-      {isSwitchLocked && (
-        <p className={styles.accountHint}>
-          Hãy dừng các pipeline đang chạy trước khi đổi ô tài khoản.
-        </p>
-      )}
-
       <div className={styles.profileList}>
         {profiles.map((profile) => (
           <div
@@ -422,10 +391,16 @@ function AccountPanel({
                   type="button"
                   className={styles.profileSelect}
                   onClick={() => onSwitch(profile.id)}
-                  disabled={profile.isActive || isSwitchLocked}
+                  disabled={profile.isActive}
                 >
                   <span>{profile.label}</span>
-                  <small>{profile.isActive ? 'Đang dùng' : 'Chuyển'}</small>
+                  <small>
+                    {profile.isActive
+                      ? 'Đang dùng'
+                      : profile.runningCount > 0
+                        ? `${profile.runningCount} đang chạy`
+                        : 'Chuyển'}
+                  </small>
                 </button>
                 <button
                   type="button"
@@ -440,7 +415,7 @@ function AccountPanel({
                     type="button"
                     className={styles.profileIconButton}
                     onClick={() => onDelete(profile.id)}
-                    disabled={isSwitchLocked}
+                    disabled={profile.runningCount > 0}
                     title="Xóa profile"
                   >
                     <Trash2 size={14} />
@@ -466,7 +441,6 @@ function AccountPanel({
         <button
           type="button"
           onClick={handleCreate}
-          disabled={isSwitchLocked}
           title="Thêm ô tài khoản Claude"
         >
           <UserPlus size={15} />
@@ -517,12 +491,14 @@ function SidebarAccountSwitcher(props) {
 function App() {
   const socketRef = useRef(null)
   const [phase, setPhase] = useState('init')
-  const [projects, setProjects] = useState([])
+  const [projectsByProfile, setProjectsByProfile] = useState({})
+  const [profileSessions, setProfileSessions] = useState({})
   const [pipelines, setPipelines] = useState([])
   const [selectedPipelineId, setSelectedPipelineId] = useState(null)
   const [showConfig, setShowConfig] = useState(false)
   const [globalStatus, setGlobalStatus] = useState('Sẵn sàng kết nối browser.')
   const [usageSnapshot, setUsageSnapshot] = useState(null)
+  const [usageByProfile, setUsageByProfile] = useState({})
   const [usageError, setUsageError] = useState('')
   const [profilesState, setProfilesState] = useState({ activeProfileId: null, profiles: [] })
   const [profileError, setProfileError] = useState('')
@@ -535,6 +511,45 @@ function App() {
     () => pipelines.filter(isActivePipeline).length,
     [pipelines]
   )
+  const profilesWithCounts = useMemo(
+    () =>
+      (profilesState.profiles || []).map((profile) => ({
+        ...profile,
+        runningCount: pipelines.filter(
+          (pipeline) =>
+            isActivePipeline(pipeline) &&
+            (pipeline.profileId || pipeline.config?.profileId) === profile.id
+        ).length,
+      })),
+    [pipelines, profilesState.profiles]
+  )
+  const activeProfileId = profilesState.activeProfileId || profilesWithCounts[0]?.id || ''
+  const activeUsage = usageByProfile[activeProfileId] || usageSnapshot
+  const pipelineGroups = useMemo(() => {
+    const groups = profilesWithCounts
+      .map((profile) => ({
+        profile,
+        session: profileSessions[profile.id] || {},
+        pipelines: pipelines.filter(
+          (pipeline) => (pipeline.profileId || pipeline.config?.profileId) === profile.id
+        ),
+      }))
+      .filter((group) => group.pipelines.length > 0)
+    const knownProfileIds = new Set(profilesWithCounts.map((profile) => profile.id))
+    const unassignedPipelines = pipelines.filter(
+      (pipeline) => !knownProfileIds.has(pipeline.profileId || pipeline.config?.profileId)
+    )
+
+    if (unassignedPipelines.length > 0) {
+      groups.push({
+        profile: { id: 'unassigned', label: 'Chưa xác định', runningCount: 0 },
+        session: {},
+        pipelines: unassignedPipelines,
+      })
+    }
+
+    return groups
+  }, [pipelines, profileSessions, profilesWithCounts])
   const maxActivePipelines =
     activeCapacity.maxActivePipelines ?? DEFAULT_MAX_ACTIVE_PIPELINES
   const selectedPipeline =
@@ -576,11 +591,46 @@ function App() {
     })
 
     socket.on('login_success', (payload) => {
-      setProjects(payload?.projects ?? [])
+      const profileId = payload?.profileId || 'default'
+      const nextProjects = payload?.projects ?? []
+      setProjectsByProfile((previous) => ({
+        ...previous,
+        [profileId]: nextProjects,
+      }))
       setPhase((previous) => (previous === 'workspace' ? 'workspace' : 'config'))
       setShowConfig((previous) => previous)
       setGlobalStatus('Đăng nhập thành công. Chọn project và cấu hình pipeline.')
-      socket.emit('request_usage')
+      socket.emit('request_usage', { profileId })
+    })
+
+    socket.on('profile_sessions_snapshot', (payload) => {
+      const nextSessions = {}
+      for (const session of payload?.sessions || []) {
+        nextSessions[session.profileId] = session
+      }
+      setProfileSessions(nextSessions)
+    })
+
+    socket.on('profile_session_update', (session) => {
+      if (!session?.profileId) {
+        return
+      }
+      setProfileSessions((previous) => ({
+        ...previous,
+        [session.profileId]: session,
+      }))
+      if (Array.isArray(session.projects)) {
+        setProjectsByProfile((previous) => ({
+          ...previous,
+          [session.profileId]: session.projects,
+        }))
+      }
+      if (session.usage) {
+        setUsageByProfile((previous) => ({
+          ...previous,
+          [session.profileId]: session.usage,
+        }))
+      }
     })
 
     socket.on('pipeline_started', ({ job, activeCount, maxActivePipelines }) => {
@@ -641,19 +691,24 @@ function App() {
       setGlobalStatus(message)
     })
 
-    socket.on('profile_ready_for_login', ({ profile }) => {
-      setUsageSnapshot(null)
+    socket.on('profile_ready_for_login', ({ profile, openConfig = true }) => {
       setUsageError('')
-      setProjects([])
-      setPipelines([])
-      setSelectedPipelineId(null)
-      setShowConfig(false)
-      setPhase('init')
+      if (openConfig) {
+        setShowConfig(true)
+      }
+      setPhase((previous) => (previous === 'workspace' ? 'workspace' : 'config'))
       setGlobalStatus(`Profile "${profile?.label || 'Tài khoản Claude'}" đã sẵn sàng. Bấm Kết nối trình duyệt để đăng nhập hoặc dùng lại session.`)
     })
 
     socket.on('usage_update', (payload) => {
-      setUsageSnapshot(payload)
+      const usage = payload?.usage || payload
+      setUsageSnapshot(usage)
+      if (payload?.profileId) {
+        setUsageByProfile((previous) => ({
+          ...previous,
+          [payload.profileId]: usage,
+        }))
+      }
       setUsageError('')
     })
 
@@ -856,15 +911,15 @@ function App() {
     }
   }, [])
 
-  const handleConnectBrowser = () => {
+  const handleConnectBrowser = (profileId = activeProfileId) => {
     if (!socketRef.current) {
       setGlobalStatus('Socket chưa sẵn sàng.')
       return
     }
 
-    setPhase('login')
+    setPhase((previous) => (previous === 'workspace' ? previous : 'login'))
     setGlobalStatus('Đang mở trình duyệt. Vui lòng đăng nhập Claude.ai...')
-    socketRef.current.emit('init_browser')
+    socketRef.current.emit('init_browser', { profileId })
   }
 
   const handleStartPipeline = (config) => {
@@ -1011,24 +1066,14 @@ function App() {
       return
     }
 
-    socketRef.current.emit('request_usage')
+    socketRef.current.emit('request_usage', { profileId: activeProfileId })
   }
 
   const handleCreateProfile = (label) => {
-    if (activePipelineCount > 0) {
-      setProfileError('Hãy dừng các pipeline đang chạy trước khi thêm ô tài khoản Claude.')
-      return
-    }
-
     socketRef.current?.emit('create_profile', { label })
   }
 
   const handleSwitchProfile = (profileId) => {
-    if (activePipelineCount > 0) {
-      setProfileError('Hãy dừng các pipeline đang chạy trước khi đổi ô tài khoản Claude.')
-      return
-    }
-
     socketRef.current?.emit('switch_profile', { profileId })
   }
 
@@ -1037,12 +1082,12 @@ function App() {
   }
 
   const handleDeleteProfile = (profileId) => {
-    if (activePipelineCount > 0) {
-      setProfileError('Hãy dừng các pipeline đang chạy trước khi xóa ô tài khoản Claude.')
+    const profile = profilesWithCounts.find((candidate) => candidate.id === profileId)
+    if (profile?.runningCount > 0) {
+      setProfileError(`Tài khoản "${profile.label}" vẫn còn ${profile.runningCount} pipeline đang chạy.`)
       return
     }
 
-    const profile = profilesState.profiles.find((candidate) => candidate.id === profileId)
     const confirmed = window.confirm(`Xóa ô tài khoản Claude "${profile?.label || profileId}"?`)
 
     if (!confirmed) {
@@ -1075,7 +1120,7 @@ function App() {
               </p>
               <p className={styles.heroHint}>
                 Sau khi đăng nhập, hãy chọn project rồi bắt đầu chạy pipeline. App có thể
-                chạy cùng lúc tối đa 2 pipeline. Nếu lỡ tắt trình duyệt hoặc mất kết nối,
+                chạy nhiều pipeline trên nhiều tài khoản Claude độc lập. Nếu lỡ tắt trình duyệt hoặc mất kết nối,
                 chỉ cần bấm lại Kết nối trình duyệt.
               </p>
               <button
@@ -1105,20 +1150,26 @@ function App() {
         {phase === 'config' && (
           <section className={styles.configStage}>
             <AccountPanel
-              profilesState={profilesState}
+              profilesState={{ ...profilesState, profiles: profilesWithCounts }}
               error={profileError}
-              activePipelineCount={activePipelineCount}
               onCreate={handleCreateProfile}
               onSwitch={handleSwitchProfile}
               onRename={handleRenameProfile}
               onDelete={handleDeleteProfile}
             />
             <UsagePanel
-              usage={usageSnapshot}
+              usage={activeUsage}
               error={usageError}
               onRefresh={handleRefreshUsage}
             />
-            <ConfigPanel projects={projects} onStart={handleStartPipeline} />
+            <ConfigPanel
+              profiles={profilesWithCounts}
+              defaultProfileId={activeProfileId}
+              profileSessions={profileSessions}
+              projectsByProfile={projectsByProfile}
+              onConnectProfile={handleConnectBrowser}
+              onStart={handleStartPipeline}
+            />
           </section>
         )}
 
@@ -1147,16 +1198,15 @@ function App() {
 
               <div className={styles.sidebarCompactGrid}>
                 <SidebarAccountSwitcher
-                  profilesState={profilesState}
+                  profilesState={{ ...profilesState, profiles: profilesWithCounts }}
                   error={profileError}
-                  activePipelineCount={activePipelineCount}
                   onCreate={handleCreateProfile}
                   onSwitch={handleSwitchProfile}
                   onRename={handleRenameProfile}
                   onDelete={handleDeleteProfile}
                 />
                 <UsageCompactPanel
-                  usage={usageSnapshot}
+                  usage={activeUsage}
                   error={usageError}
                   onRefresh={handleRefreshUsage}
                 />
@@ -1169,38 +1219,55 @@ function App() {
                     <span>Chưa có pipeline nào.</span>
                   </div>
                 ) : (
-                  pipelines.map((pipeline) => (
-                    <div
-                      key={pipeline.id}
-                      className={`${styles.pipelineRow} ${
-                        pipeline.id === selectedPipeline?.id ? styles.pipelineRowActive : ''
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        className={styles.pipelineCard}
-                        onClick={() => {
-                          setSelectedPipelineId(pipeline.id)
-                          setShowConfig(false)
-                        }}
-                      >
-                        <span className={styles.pipelineName}>{getPipelineTitle(pipeline)}</span>
-                        <span className={`${styles.pipelineStatus} ${styles[pipeline.status] || ''}`}>
-                          {getPipelineStatusLabel(pipeline.status)}
-                        </span>
-                        <span className={styles.pipelineMeta}>
-                          Bước {pipeline.currentStep || 0}/{getPipelineStepDefinitions(pipeline).length}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className={styles.pipelineDeleteButton}
-                        onClick={() => handleDeletePipeline(pipeline.id)}
-                        title="Xóa pipeline khỏi danh sách"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
+                  pipelineGroups.map((group) => (
+                    <section className={styles.pipelineGroup} key={group.profile.id}>
+                      <header className={styles.pipelineGroupHeader}>
+                        <span
+                          className={`${styles.profileStatusDot} ${
+                            group.session.connected ? styles.profileStatusConnected : ''
+                          }`}
+                        />
+                        <strong title={group.profile.label}>{group.profile.label}</strong>
+                        <small>
+                          {group.profile.runningCount || 0} đang chạy
+                        </small>
+                      </header>
+                      <div className={styles.pipelineGroupList}>
+                        {group.pipelines.map((pipeline) => (
+                          <div
+                            key={pipeline.id}
+                            className={`${styles.pipelineRow} ${
+                              pipeline.id === selectedPipeline?.id ? styles.pipelineRowActive : ''
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              className={styles.pipelineCard}
+                              onClick={() => {
+                                setSelectedPipelineId(pipeline.id)
+                                setShowConfig(false)
+                              }}
+                            >
+                              <span className={styles.pipelineName}>{getPipelineTitle(pipeline)}</span>
+                              <span className={`${styles.pipelineStatus} ${styles[pipeline.status] || ''}`}>
+                                {getPipelineStatusLabel(pipeline.status)}
+                              </span>
+                              <span className={styles.pipelineMeta}>
+                                Bước {pipeline.currentStep || 0}/{getPipelineStepDefinitions(pipeline).length}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className={styles.pipelineDeleteButton}
+                              onClick={() => handleDeletePipeline(pipeline.id)}
+                              title="Xóa pipeline khỏi danh sách"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
                   ))
                 )}
               </div>
@@ -1218,13 +1285,22 @@ function App() {
                       Đang chạy {pipelineCapacityLabel}
                     </span>
                   </div>
-                  <ConfigPanel projects={projects} onStart={handleStartPipeline} />
+                  <ConfigPanel
+                    profiles={profilesWithCounts}
+                    defaultProfileId={activeProfileId}
+                    profileSessions={profileSessions}
+                    projectsByProfile={projectsByProfile}
+                    onConnectProfile={handleConnectBrowser}
+                    onStart={handleStartPipeline}
+                  />
                 </div>
               ) : selectedPipeline ? (
                 <>
                   <div className={styles.detailHeader}>
                     <div>
-                      <p className={styles.eyebrow}>Pipeline đang chọn</p>
+                      <p className={styles.eyebrow}>
+                        Pipeline đang chọn · {selectedPipeline.profileLabel || 'Chưa xác định account'}
+                      </p>
                       <h2>{getPipelineTitle(selectedPipeline)}</h2>
                     </div>
                     <div className={styles.detailActions}>

@@ -20,6 +20,12 @@ const CONTEXT_LIMIT_PATTERNS = [
   /reduce the length/i,
 ];
 const CLAUDE_CONNECTION_ERROR_PATTERNS = [
+  /5-hour limit reached\s*[-·]?\s*resets?/i,
+  /you(?:'|’)?ve hit your limit/i,
+  /you have reached your message limit/i,
+  /limit reached\s*[-·]?\s*resets?/i,
+  /too many responses are running at once/i,
+  /you can stop a response or wait for one to finish, then try again/i,
   /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i,
   /we (?:couldn['’]?t|could not) connect to claude/i,
   /(?:couldn['’]?t|could not) connect to claude/i,
@@ -50,8 +56,21 @@ function normalizeClaudeUrl(url, baseUrl = CLAUDE_ORIGIN) {
 }
 
 function isClaudeTooManyChatsMessage(message) {
-  return /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i.test(
-    String(message || '')
+  const text = String(message || '');
+  return (
+    /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i.test(text) ||
+    /too many responses are running at once/i.test(text) ||
+    /you can stop a response or wait for one to finish, then try again/i.test(text)
+  );
+}
+
+function isClaudeUsageLimitMessage(message) {
+  const text = String(message || '');
+  return (
+    /5-hour limit reached\s*[-·]?\s*resets?/i.test(text) ||
+    /you(?:'|’)?ve hit your limit/i.test(text) ||
+    /you have reached your message limit/i.test(text) ||
+    /limit reached\s*[-·]?\s*resets?/i.test(text)
   );
 }
 
@@ -59,9 +78,11 @@ function createClaudeConnectionError(message) {
   const error = new Error(
     message || 'Claude connection error detected. The response was not completed.'
   );
-  error.code = isClaudeTooManyChatsMessage(message)
-    ? 'CLAUDE_TOO_MANY_CHATS'
-    : 'CLAUDE_CONNECTION_ERROR';
+  error.code = isClaudeUsageLimitMessage(message)
+    ? 'CLAUDE_USAGE_LIMIT'
+    : isClaudeTooManyChatsMessage(message)
+      ? 'CLAUDE_TOO_MANY_CHATS'
+      : 'CLAUDE_CONNECTION_ERROR';
   return error;
 }
 
@@ -2096,9 +2117,8 @@ async function waitForVisibleChatInput(page, timeoutMs = 60000) {
     if (connectionErrorMessage) {
       if (isClaudeTooManyChatsMessage(connectionErrorMessage)) {
         await dismissTooManyChatsAlert(page);
-      } else {
-        throw createClaudeConnectionError(connectionErrorMessage);
       }
+      throw createClaudeConnectionError(connectionErrorMessage);
     }
 
     const input = await findVisibleChatInput(page);
@@ -2122,9 +2142,8 @@ async function waitForClaudeReadyToSend(page, timeoutMs = 120000) {
     if (connectionErrorMessage) {
       if (isClaudeTooManyChatsMessage(connectionErrorMessage)) {
         await dismissTooManyChatsAlert(page);
-      } else {
-        throw createClaudeConnectionError(connectionErrorMessage);
       }
+      throw createClaudeConnectionError(connectionErrorMessage);
     }
 
     const controlState = await getGenerationControlState(page);
@@ -2135,9 +2154,11 @@ async function waitForClaudeReadyToSend(page, timeoutMs = 120000) {
     await sleep(2000);
   }
 
-  throw createClaudeConnectionError(
+  const error = createClaudeConnectionError(
     'Claude is still busy and the composer is not ready for a new message.'
   );
+  error.code = 'CLAUDE_TOO_MANY_CHATS';
+  throw error;
 }
 
 async function hasStopGenerating(page) {
@@ -2784,7 +2805,9 @@ async function dismissTooManyChatsAlert(page) {
   try {
     const alert = page
       .locator('[role="alert"], [role="status"], [aria-live], [data-testid*="toast" i], [class*="toast" i]')
-      .filter({ hasText: /Looks like you have too many chats going/i })
+      .filter({
+        hasText: /Looks like you have too many chats going|Too many responses are running at once/i,
+      })
       .first();
 
     if (!await isLocatorVisible(alert, 500)) {
@@ -4569,7 +4592,9 @@ async function waitForResponse(page, responseBaseline = null, options = {}) {
     } catch (error) {
       if (
         error?.code === 'CLAUDE_RESPONSE_TOO_SHORT' ||
-        error?.code === 'CLAUDE_CONNECTION_ERROR'
+        error?.code === 'CLAUDE_CONNECTION_ERROR' ||
+        error?.code === 'CLAUDE_USAGE_LIMIT' ||
+        error?.code === 'CLAUDE_TOO_MANY_CHATS'
       ) {
         throw error;
       }

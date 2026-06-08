@@ -278,7 +278,18 @@ function isClaudeTooManyChatsError(error) {
   return error?.code === 'CLAUDE_TOO_MANY_CHATS' ||
     /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i.test(
       error?.message || ''
+    ) ||
+    /too many responses are running at once/i.test(error?.message || '') ||
+    /you can stop a response or wait for one to finish, then try again/i.test(
+      error?.message || ''
     );
+}
+
+function isClaudeUsageLimitError(error) {
+  return error?.code === 'CLAUDE_USAGE_LIMIT' ||
+    /5-hour limit reached\s*[-·]?\s*resets?/i.test(error?.message || '') ||
+    /you(?:'|’)?ve hit your limit/i.test(error?.message || '') ||
+    /you have reached your message limit/i.test(error?.message || '');
 }
 
 function isRetriableStepError(error) {
@@ -356,6 +367,12 @@ async function executeStep(page, step, config, socket, runtime = {}) {
         stepNumber,
         stepName,
         minResponseChars,
+        pipelineId,
+        shouldStop: runtime.shouldStop,
+        onWait(message) {
+          emitStatus(socket, message, pipelineId);
+          emitLog(socket, message, pipelineId);
+        },
       });
       throwIfStopped(runtime);
       emitLog(socket, 'Đã gửi tin nhắn và nhận phản hồi.', pipelineId);
@@ -367,20 +384,34 @@ async function executeStep(page, step, config, socket, runtime = {}) {
         throw new PipelineStoppedError();
       }
 
-      if (isClaudeTooManyChatsError(error)) {
+      if (isClaudeTooManyChatsError(error) || isClaudeUsageLimitError(error)) {
         tooManyChatsRetryCount += 1;
-        const retryDelayMs = Math.floor(Math.random() * 1001) + 1000;
-        emitStatus(
-          socket,
-          `Claude dang gioi han chat. Dang gui lai buoc ${stepNumber} sau ${Math.round(retryDelayMs / 100) / 10} giay...`,
-          pipelineId
-        );
         emitLog(
           socket,
-          `Claude bao "Looks like you have too many chats going". Dang gui lai dung prompt buoc ${stepNumber}, lan ${tooManyChatsRetryCount}.`,
+          isClaudeUsageLimitError(error)
+            ? `Claude báo tài khoản đã hết usage. Pipeline giữ nguyên tại bước ${stepNumber} và đang chờ reset.`
+            : `Claude báo đang có quá nhiều phản hồi hoặc account có thể đã hết usage. Đang kiểm tra trước khi thử lại đúng bước ${stepNumber}.`,
           pipelineId
         );
-        await sleepUntil(retryDelayMs, runtime);
+        if (page && typeof page.waitForAccountReady === 'function') {
+          await page.waitForAccountReady(error, {
+            pipelineId,
+            modelName: config.modelName,
+            retryCount: tooManyChatsRetryCount,
+            shouldStop: runtime.shouldStop,
+            onWait(message) {
+              emitStatus(socket, message, pipelineId);
+              emitLog(socket, message, pipelineId);
+            },
+          });
+        } else {
+          await sleepUntil(Math.min(60000, tooManyChatsRetryCount * 10000), runtime);
+        }
+        emitStatus(
+          socket,
+          `Tài khoản đã sẵn sàng. Đang thử lại đúng bước ${stepNumber}...`,
+          pipelineId
+        );
         continue;
       }
 

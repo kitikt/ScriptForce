@@ -32,6 +32,37 @@ function createUsageMetric({ label, usedPercent = null, resetText = '', note = '
   };
 }
 
+function getUsageBlock(usage, modelName = '') {
+  if (!usage) {
+    return null;
+  }
+
+  const metrics = [
+    usage.currentSession,
+    ...(Array.isArray(usage.weekly) ? usage.weekly.slice(0, 1) : []),
+  ];
+
+  if (/sonnet/i.test(modelName) && Array.isArray(usage.weekly)) {
+    metrics.push(usage.weekly.find((metric) => /sonnet/i.test(metric?.label || '')));
+  }
+
+  const blockedMetric = metrics.find(
+    (metric) => Number(metric?.usedPercent) >= 100
+  );
+
+  if (!blockedMetric) {
+    return null;
+  }
+
+  return {
+    blocked: true,
+    label: blockedMetric.label || 'Claude usage',
+    usedPercent: blockedMetric.usedPercent,
+    resetsAt: blockedMetric.resetsAt || null,
+    resetText: blockedMetric.resetText || '',
+  };
+}
+
 function formatResetText(resetsAt) {
   if (!resetsAt) {
     return '';
@@ -218,6 +249,7 @@ async function readClaudeUsage(page) {
 
 module.exports = {
   USAGE_URL,
+  getUsageBlock,
   normalizeClaudeUsageApi,
   parseClaudeUsageText,
   readClaudeUsage,
