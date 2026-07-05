@@ -1,4 +1,4 @@
-const { launchBrowser, waitForLogin } = require('./browser');
+const { focusProfileBrowserWindow, launchBrowser, waitForLogin } = require('./browser');
 const { createClaudeWebProvider } = require('./providers/claudeWebProvider');
 const { getUsageBlock, readClaudeUsage } = require('./usage');
 
@@ -117,17 +117,24 @@ function createProfileSessionManager(options = {}) {
     });
   }
 
-  async function connect(profile, socket = io) {
+  async function connect(profile, socket = io, options = {}) {
     const session = getOrCreate(profile);
+    const focusWindow = Boolean(options.focusWindow);
     clearIdleTimer(session);
 
     if (isContextAlive(session.context)) {
       session.status = 'connected';
+      if (focusWindow) {
+        await focusProfileBrowserWindow(profile.userDataDir).catch(() => {});
+      }
       emitSession(session, socket);
       return session;
     }
 
     if (session.initPromise) {
+      if (focusWindow) {
+        await focusProfileBrowserWindow(profile.userDataDir).catch(() => {});
+      }
       await session.initPromise;
       emitSession(session, socket);
       return session;
@@ -140,6 +147,7 @@ function createProfileSessionManager(options = {}) {
     session.initPromise = (async () => {
       try {
         const { context, page } = await launchBrowser({
+          focusWindow,
           userDataDir: profile.userDataDir,
         });
         session.context = context;

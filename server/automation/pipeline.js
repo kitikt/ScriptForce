@@ -163,14 +163,8 @@ function buildPromptForStep(step, config) {
 }
 
 async function randomStepDelay(runtime = {}, options = {}) {
-  const stepNumber = Number(options.stepNumber || 0);
-  const hasArtifact = Array.isArray(options.artifacts) && options.artifacts.length > 0;
-  const longCooldown = stepNumber >= 7 || hasArtifact;
-  const minMs = longCooldown ? 45000 : 5000;
-  const maxMs = longCooldown ? 75000 : 15000;
-  const delayMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
-  console.log(`[Pipeline] Waiting ${delayMs}ms before next step...`);
-  await sleepUntil(delayMs, runtime);
+  void runtime;
+  void options;
 }
 
 function emitSocketEvent(socket, eventName, payload) {
@@ -703,12 +697,7 @@ async function runPipeline(page, config, socket, runtime = {}) {
         }
 
         if (stepNumber < pipelineSteps.length) {
-          emitLog(socket, 'Đang chờ trước khi sang bước tiếp theo...', pipelineId);
           emitUrlLog(socket, provider, pipelineId);
-          await randomStepDelay(runtime, {
-            stepNumber,
-            artifacts,
-          });
         }
       } catch (error) {
         if (isPipelineStoppedError(error) || shouldStop()) {

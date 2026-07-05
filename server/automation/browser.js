@@ -75,14 +75,71 @@ foreach ($process in $processes) {
   });
 }
 
+function focusProfileBrowserWindow(userDataDir) {
+  return new Promise((resolve) => {
+    const escapedProfile = userDataDir.replace(/'/g, "''");
+    const command = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class ScriptForgeWindowFocus {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+}
+"@
+$profile = '${escapedProfile}'.ToLowerInvariant()
+$deadline = (Get-Date).AddSeconds(8)
+do {
+  $processIds = Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.Name -match '^(chrome|chromium|msedge)\\.exe$' -and
+      $_.CommandLine -and
+      $_.CommandLine.ToLowerInvariant().Contains($profile)
+    } |
+    Select-Object -ExpandProperty ProcessId
+  $windowProcess = $processIds |
+    ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue } |
+    Where-Object { $_.MainWindowHandle -ne 0 } |
+    Sort-Object StartTime |
+    Select-Object -First 1
+  if ($windowProcess) {
+    [ScriptForgeWindowFocus]::ShowWindowAsync($windowProcess.MainWindowHandle, 9) | Out-Null
+    [ScriptForgeWindowFocus]::BringWindowToTop($windowProcess.MainWindowHandle) | Out-Null
+    [ScriptForgeWindowFocus]::SetForegroundWindow($windowProcess.MainWindowHandle) | Out-Null
+    Write-Output $windowProcess.Id
+    exit 0
+  }
+  Start-Sleep -Milliseconds 250
+} while ((Get-Date) -lt $deadline)
+`;
+
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+      { windowsHide: true },
+      (error, stdout) => {
+        if (error) {
+          console.warn('[Browser] Failed to focus Chromium window:', error.message);
+          resolve(null);
+          return;
+        }
+
+        resolve(stdout.trim() || null);
+      }
+    );
+  });
+}
+
 async function createPersistentContext(userDataDir) {
+  const args = [
+    '--disable-blink-features=AutomationControlled',
+  ];
+
   return chromium.launchPersistentContext(userDataDir, {
     headless: false,
     viewport: null,
-    args: [
-      '--start-minimized',
-      '--disable-blink-features=AutomationControlled',
-    ],
+    args,
     ignoreDefaultArgs: ['--enable-automation'],
   });
 }
@@ -119,7 +176,11 @@ async function selectAutomationPage(context) {
 }
 
 async function launchBrowser(options = {}) {
-  const { recoverProfileLock = true, userDataDir = BROWSER_USER_DATA_DIR } = options;
+  const {
+    focusWindow = false,
+    recoverProfileLock = true,
+    userDataDir = BROWSER_USER_DATA_DIR,
+  } = options;
   let context;
 
   if (recoverProfileLock) {
@@ -157,6 +218,10 @@ async function launchBrowser(options = {}) {
   }
 
   const page = await selectAutomationPage(context);
+  if (focusWindow) {
+    await page.bringToFront().catch(() => {});
+    await focusProfileBrowserWindow(userDataDir).catch(() => {});
+  }
 
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -167,6 +232,10 @@ async function launchBrowser(options = {}) {
       waitUntil: 'domcontentloaded',
       timeout: 60000,
     });
+    if (focusWindow) {
+      await page.bringToFront().catch(() => {});
+      await focusProfileBrowserWindow(userDataDir).catch(() => {});
+    }
   }
 
   return { context, page };
@@ -184,11 +253,22 @@ async function waitForLogin(page) {
       const url = page.url();
 
       if (url.includes('claude.ai/new') || url.includes('claude.ai/chat') || url.includes('claude.ai/project')) {
-        const hasInput = await page.evaluate(() => {
-          return !!document.querySelector('div[contenteditable="true"]');
+        const hasLoggedInUi = await page.evaluate(() => {
+          const bodyText = document.body?.innerText || '';
+          const hasComposer = Boolean(
+            document.querySelector(
+              'div[contenteditable="true"], [contenteditable="true"], textarea, [role="textbox"]'
+            )
+          );
+          const hasClaudeComposerText = /Type\s*\/\s*for skills/i.test(bodyText);
+          const hasLoggedInChrome =
+            /Sonnet|Opus|Haiku|Claude(?:'|’)s choice/i.test(bodyText) &&
+            !/Sign in|Log in|Continue with Google/i.test(bodyText);
+
+          return hasComposer || hasClaudeComposerText || hasLoggedInChrome;
         });
 
-        if (hasInput) {
+        if (hasLoggedInUi) {
           console.log('Login detected!');
           return true;
         }
@@ -211,6 +291,7 @@ async function waitForLogin(page) {
 module.exports = {
   BROWSER_USER_DATA_DIR,
   closeExistingProfileBrowsers,
+  focusProfileBrowserWindow,
   isProfileAlreadyOpenError,
   launchBrowser,
   waitForLogin,

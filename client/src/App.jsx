@@ -625,6 +625,11 @@ function App() {
           [session.profileId]: session.projects,
         }))
       }
+      if (session.connected && Array.isArray(session.projects) && session.projects.length > 0) {
+        setPhase((previous) => (previous === 'workspace' ? 'workspace' : 'config'))
+        setGlobalStatus('Đăng nhập thành công. Chọn project và cấu hình pipeline.')
+        socket.emit('request_usage', { profileId: session.profileId })
+      }
       if (session.usage) {
         setUsageByProfile((previous) => ({
           ...previous,

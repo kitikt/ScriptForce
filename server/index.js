@@ -904,7 +904,9 @@ io.on('connection', (socket) => {
       const requestedProfileId = payload.profileId || (await getActiveProfile()).profile.id;
       const { profile } = await getProfile(requestedProfileId);
       socket.emit('status', `Dang ket noi Claude profile: ${profile.label}`);
-      const session = await profileSessionManager.connect(profile, socket);
+      const session = await profileSessionManager.connect(profile, socket, {
+        focusWindow: true,
+      });
       await switchProfile(profile.id);
       await emitProfiles(socket);
       socket.emit('login_success', {

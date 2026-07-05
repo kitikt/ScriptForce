@@ -45,10 +45,8 @@ function sleep(ms) {
 }
 
 async function randomDelay(minMs = 1000, maxMs = 3000) {
-  const delay =
-    Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
-
-  await sleep(delay);
+  void minMs;
+  void maxMs;
 }
 
 function normalizeClaudeUrl(url, baseUrl = CLAUDE_ORIGIN) {
@@ -1282,6 +1280,10 @@ function getModelFamilyMatcherSource(modelName) {
   return family ? `(?:^|\\n|\\s)${family}(?:\\s|\\n|$)` : '';
 }
 
+function hasExplicitModelVersion(modelName) {
+  return /\b\d+(?:\.\d+)?\b/.test(String(modelName || ''));
+}
+
 async function findExactModelOption(page, modelName) {
   const modelPattern = new RegExp(getModelNameMatcherSource(modelName), 'i');
   const candidates = page.locator('button, [role="option"], [role="menuitem"], [data-radix-collection-item], [data-base-ui-collection-item], [cmdk-item]');
@@ -1467,10 +1469,11 @@ async function clickExactModelOptionByText(page, modelName) {
 async function verifySelectedModel(page, modelName, timeoutMs = 5000) {
   const modelPatternSource = getModelNameMatcherSource(modelName);
   const familyPatternSource = getModelFamilyMatcherSource(modelName);
+  const exactModelRequired = hasExplicitModelVersion(modelName);
 
   try {
     await page.waitForFunction(
-      ({ source, familySource }) => {
+      ({ source, familySource, exactRequired }) => {
         const pattern = new RegExp(source, 'i');
         const familyPattern = familySource ? new RegExp(familySource, 'i') : null;
         const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -1501,10 +1504,14 @@ async function verifySelectedModel(page, modelName, timeoutMs = 5000) {
             String(element.innerText || element.textContent || element.getAttribute('aria-label') || '')
           );
 
-          return pattern.test(text) || Boolean(familyPattern && familyPattern.test(text));
+          if (pattern.test(text)) {
+            return true;
+          }
+
+          return !exactRequired && Boolean(familyPattern && familyPattern.test(text));
         });
       },
-      { source: modelPatternSource, familySource: familyPatternSource },
+      { source: modelPatternSource, familySource: familyPatternSource, exactRequired: exactModelRequired },
       { timeout: timeoutMs }
     );
 
@@ -1514,7 +1521,7 @@ async function verifySelectedModel(page, modelName, timeoutMs = 5000) {
   }
 }
 
-async function openMoreModelsMenu(page) {
+async function openMoreModelsMenu(page, modelName) {
   const moreModels = await findFirstVisibleLocator([
     page.getByRole('menuitem', { name: /More models/i }),
     page.getByRole('button', { name: /More models/i }),
@@ -1526,13 +1533,26 @@ async function openMoreModelsMenu(page) {
   }
 
   await moreModels.hover().catch(() => {});
-  await sleep(300);
+  await sleep(500);
 
-  if (await findExactModelOption(page, 'Opus 4.6')) {
+  if (await findExactModelOption(page, modelName)) {
     return true;
   }
 
-  return clickClaudeUi(moreModels, page, 'more models menu');
+  if (!await clickClaudeUi(moreModels, page, 'more models menu')) {
+    return false;
+  }
+
+  await sleep(500);
+
+  if (await findExactModelOption(page, modelName)) {
+    return true;
+  }
+
+  await moreModels.hover().catch(() => {});
+  await sleep(500);
+
+  return Boolean(await findExactModelOption(page, modelName));
 }
 
 async function selectModel(page, modelName, options = {}) {
@@ -1552,15 +1572,15 @@ async function selectModel(page, modelName, options = {}) {
 
     let modelOption = await findExactModelOption(page, modelName);
 
-    if (!modelOption && /opus\s*4\.6/i.test(String(modelName || ''))) {
-      console.log('[Claude] Exact Opus 4.6 not visible. Opening More models...');
-      if (await openMoreModelsMenu(page)) {
+    if (!modelOption) {
+      console.log(`[Claude] Exact ${modelName} not visible. Opening More models...`);
+      if (await openMoreModelsMenu(page, modelName)) {
         await randomDelay(400, 900);
         modelOption = await findExactModelOption(page, modelName);
       }
     }
 
-    if (!modelOption && getModelFamily(modelName)) {
+    if (!modelOption && !hasExplicitModelVersion(modelName) && getModelFamily(modelName)) {
       console.log(`[Claude] Exact model not visible. Trying ${getModelFamily(modelName)} family option...`);
       modelOption = await findModelFamilyOption(page, modelName);
     }
