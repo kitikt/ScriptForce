@@ -23,6 +23,13 @@ function withTimeout(promise, timeoutMs, message) {
   });
 }
 
+function createFriendlyBrowserError(message, code, cause = null) {
+  const error = new Error(message);
+  error.code = code;
+  error.cause = cause;
+  return error;
+}
+
 function findBundledChromiumExecutable() {
   const appRoot = path.join(__dirname, '..');
   const browserRoots = [
@@ -52,6 +59,73 @@ function findBundledChromiumExecutable() {
   }
 
   return '';
+}
+
+function getChromiumPreflightFailureMessage(error, executablePath) {
+  const rawDetails = [
+    error?.message,
+    error?.stderr,
+    error?.stdout,
+    error?.code ? `code=${error.code}` : '',
+    error?.signal ? `signal=${error.signal}` : '',
+  ].filter(Boolean).join(' | ');
+  const details = rawDetails.slice(0, 600);
+  const lowerDetails = rawDetails.toLowerCase();
+  const executableLine = executablePath ? `Chrome: ${executablePath}` : 'Chrome: không tìm thấy chrome.exe trong portable.';
+
+  if (!executablePath || /enoent|not found|cannot find|không tìm thấy/i.test(rawDetails)) {
+    return `Không tìm thấy Chromium bundled. ${executableLine} Cách sửa: tải lại file zip mới nhất, bấm Extract All/giải nén đầy đủ trước khi chạy, không chạy trực tiếp trong file zip.`;
+  }
+
+  if (/eacces|eperm|permission|access is denied|operation not permitted/i.test(rawDetails)) {
+    return `Windows/antivirus đang chặn Chromium bundled. ${executableLine} Cách sửa: mở Windows Security > Protection history, Allow/Restore chrome.exe của ScriptForge, hoặc thêm thư mục ScriptForge-win32-x64 vào Exclusions rồi mở lại app. Chi tiết: ${details}`;
+  }
+
+  if (
+    /vcruntime|msvcp|api-ms-win|ucrtbase|0xc0000135|0xc000007b|side-by-side|configuration is incorrect|dll/i
+      .test(lowerDetails)
+  ) {
+    return `Máy sạch thiếu runtime/DLL để chạy Chromium. ${executableLine} Cách sửa: cài Microsoft Visual C++ Redistributable 2015-2022 x64, khởi động lại máy, rồi mở ScriptForge lại. Chi tiết: ${details}`;
+  }
+
+  if (/timed out|timeout/i.test(rawDetails)) {
+    return `Chromium bundled không phản hồi khi kiểm tra trước khi mở. ${executableLine} Cách sửa: kiểm tra Windows Security/antivirus có đang scan hoặc chặn chrome.exe không; nếu có hãy Allow/Restore hoặc thêm Exclusion cho thư mục ScriptForge-win32-x64. Chi tiết: ${details}`;
+  }
+
+  return `Không chạy được Chromium bundled trên máy này. ${executableLine} Cách sửa nhanh: giải nén lại zip vào thư mục ngắn như C:\\ScriptForge, Allow trong Windows Security nếu bị chặn, cài Microsoft Visual C++ Redistributable 2015-2022 x64, rồi mở lại app. Chi tiết: ${details}`;
+}
+
+function verifyBundledChromiumExecutable(executablePath) {
+  return new Promise((resolve, reject) => {
+    if (!executablePath) {
+      reject(createFriendlyBrowserError(
+        getChromiumPreflightFailureMessage(null, executablePath),
+        'BUNDLED_CHROMIUM_NOT_FOUND'
+      ));
+      return;
+    }
+
+    execFile(
+      executablePath,
+      ['--version'],
+      { timeout: 15000, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error) {
+          error.stdout = stdout;
+          error.stderr = stderr;
+          reject(createFriendlyBrowserError(
+            getChromiumPreflightFailureMessage(error, executablePath),
+            'BUNDLED_CHROMIUM_PREFLIGHT_FAILED',
+            error
+          ));
+          return;
+        }
+
+        console.log('[Browser] Bundled Chromium preflight OK:', String(stdout || stderr || '').trim());
+        resolve(true);
+      }
+    );
+  });
 }
 
 function isProfileAlreadyOpenError(error) {
@@ -129,6 +203,68 @@ foreach ($process in $processes) {
   });
 }
 
+async function clearProfileLockFiles(userDataDir) {
+  const lockNames = [
+    'SingletonCookie',
+    'SingletonLock',
+    'SingletonSocket',
+    'lockfile',
+  ];
+  const removed = [];
+
+  for (const lockName of lockNames) {
+    const lockPath = path.join(userDataDir, lockName);
+
+    if (!fs.existsSync(lockPath)) {
+      continue;
+    }
+
+    await fs.promises.rm(lockPath, { force: true, recursive: true }).catch(() => {});
+
+    if (!fs.existsSync(lockPath)) {
+      removed.push(lockName);
+    }
+  }
+
+  return removed;
+}
+
+function unblockPortableFiles() {
+  return new Promise((resolve) => {
+    const appRoot = path.join(__dirname, '..');
+    const escapedRoot = appRoot.replace(/'/g, "''");
+    const command = `
+$root = '${escapedRoot}'
+$files = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue
+$count = 0
+foreach ($file in $files) {
+  Unblock-File -LiteralPath $file.FullName -ErrorAction SilentlyContinue
+  $count++
+}
+Write-Output $count
+`;
+
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+      { windowsHide: true, timeout: 120000 },
+      (error, stdout) => {
+        if (error) {
+          console.warn('[Browser] Failed to unblock portable files:', error.message);
+          resolve({ ok: false, count: 0, error: error.message });
+          return;
+        }
+
+        resolve({
+          ok: true,
+          count: Number(String(stdout || '').trim()) || 0,
+          error: '',
+        });
+      }
+    );
+  });
+}
+
 function focusProfileBrowserWindow(userDataDir) {
   return new Promise((resolve) => {
     const escapedProfile = userDataDir.replace(/'/g, "''");
@@ -201,9 +337,13 @@ async function createPersistentContext(userDataDir) {
 
   if (executablePath) {
     console.log('[Browser] Using bundled Chromium executable:', executablePath);
+    await verifyBundledChromiumExecutable(executablePath);
     launchOptions.executablePath = executablePath;
   } else {
-    console.warn('[Browser] Bundled Chromium executable not found. Falling back to Playwright registry resolution.');
+    throw createFriendlyBrowserError(
+      getChromiumPreflightFailureMessage(null, executablePath),
+      'BUNDLED_CHROMIUM_NOT_FOUND'
+    );
   }
 
   return withTimeout(
@@ -211,6 +351,29 @@ async function createPersistentContext(userDataDir) {
     60000,
     'Timed out launching bundled Chromium.'
   );
+}
+
+async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
+  const closedProcessIds = await closeExistingProfileBrowsers(userDataDir);
+
+  if (closedProcessIds.length > 0) {
+    await sleep(1200);
+  }
+
+  const removedLocks = await clearProfileLockFiles(userDataDir);
+  const unblockResult = await unblockPortableFiles();
+  const executablePath = findBundledChromiumExecutable();
+
+  await verifyBundledChromiumExecutable(executablePath);
+
+  return {
+    executablePath,
+    closedProcessIds,
+    removedLocks,
+    unblockedFiles: unblockResult.count,
+    unblockOk: unblockResult.ok,
+    unblockError: unblockResult.error,
+  };
 }
 
 function isClaudePage(page) {
@@ -363,5 +526,6 @@ module.exports = {
   focusProfileBrowserWindow,
   isProfileAlreadyOpenError,
   launchBrowser,
+  repairChromiumLaunch,
   waitForLogin,
 };

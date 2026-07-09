@@ -8,6 +8,7 @@ const { Server } = require('socket.io');
 
 const { runPipeline } = require('./automation/pipeline');
 const { createProfileSessionManager } = require('./automation/profileSessionManager');
+const { repairChromiumLaunch } = require('./automation/browser');
 const {
   createProfile,
   deleteProfile,
@@ -916,6 +917,41 @@ io.on('connection', (socket) => {
       });
     } catch (error) {
       console.error('[Server] init_browser failed:', error);
+      socket.emit('error', {
+        profileId: payload.profileId || null,
+        stepNumber: 0,
+        error: getClientErrorMessage(error),
+      });
+    }
+  });
+
+  socket.on('repair_chromium', async (payload = {}) => {
+    try {
+      const requestedProfileId = payload.profileId || (await getActiveProfile()).profile.id;
+      const { profile } = await getProfile(requestedProfileId);
+      socket.emit('status', 'Đang tự sửa lỗi Chromium: đóng tiến trình kẹt, gỡ khóa profile, bỏ chặn file portable...');
+      const repairResult = await repairChromiumLaunch(profile.userDataDir);
+      socket.emit('browser_repair_done', {
+        profileId: profile.id,
+        result: repairResult,
+      });
+      socket.emit('status', 'Đã sửa xong phần Chromium. Đang thử mở lại trình duyệt...');
+      const session = await profileSessionManager.connect(profile, socket, {
+        focusWindow: true,
+      });
+      await switchProfile(profile.id);
+      await emitProfiles(socket);
+      socket.emit('login_success', {
+        profileId: profile.id,
+        profileLabel: profile.label,
+        projects: session.projects,
+      });
+    } catch (error) {
+      console.error('[Server] repair_chromium failed:', error);
+      socket.emit('browser_repair_failed', {
+        profileId: payload.profileId || null,
+        error: getClientErrorMessage(error),
+      });
       socket.emit('error', {
         profileId: payload.profileId || null,
         stepNumber: 0,

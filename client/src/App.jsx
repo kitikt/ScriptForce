@@ -12,6 +12,7 @@ import {
   Trash2,
   UserPlus,
   UserRound,
+  Wrench,
   X,
 } from 'lucide-react'
 
@@ -502,6 +503,7 @@ function App() {
   const [usageError, setUsageError] = useState('')
   const [profilesState, setProfilesState] = useState({ activeProfileId: null, profiles: [] })
   const [profileError, setProfileError] = useState('')
+  const [browserRepairing, setBrowserRepairing] = useState(false)
   const [activeCapacity, setActiveCapacity] = useState({
     activeCount: 0,
     maxActivePipelines: DEFAULT_MAX_ACTIVE_PIPELINES,
@@ -593,6 +595,8 @@ function App() {
     socket.on('login_success', (payload) => {
       const profileId = payload?.profileId || 'default'
       const nextProjects = payload?.projects ?? []
+      setBrowserRepairing(false)
+      setProfileError('')
       setProjectsByProfile((previous) => ({
         ...previous,
         [profileId]: nextProjects,
@@ -715,6 +719,21 @@ function App() {
         }))
       }
       setUsageError('')
+    })
+
+    socket.on('browser_repair_done', (payload) => {
+      const result = payload?.result || {}
+      setGlobalStatus(
+        `Đã sửa Chromium: đóng ${result.closedProcessIds?.length || 0} tiến trình, gỡ ${result.removedLocks?.length || 0} khóa profile, unblock ${result.unblockedFiles || 0} file. Đang mở lại trình duyệt...`
+      )
+    })
+
+    socket.on('browser_repair_failed', (payload) => {
+      const message = getCompactMessage(payload?.error || 'Không tự sửa được Chromium.', 900)
+      setBrowserRepairing(false)
+      setProfileError(message)
+      setGlobalStatus(message)
+      setPhase((previous) => (previous === 'login' ? 'init' : previous))
     })
 
     socket.on('usage_error', (payload) => {
@@ -885,10 +904,12 @@ function App() {
     socket.on('error', (payload) => {
       const pipelineId = payload?.pipelineId
       const stepNumber = payload?.stepNumber ?? 0
-      const message = getCompactMessage(payload?.error || 'Có lỗi xảy ra.')
+      const message = getCompactMessage(payload?.error || 'Có lỗi xảy ra.', pipelineId ? 260 : 900)
 
       if (!pipelineId) {
         setGlobalStatus(message)
+        setProfileError(message)
+        setBrowserRepairing(false)
         setPhase((previous) => (previous === 'login' ? 'init' : previous))
         return
       }
@@ -921,8 +942,22 @@ function App() {
     }
 
     setPhase((previous) => (previous === 'workspace' ? previous : 'login'))
+    setProfileError('')
     setGlobalStatus('Đang mở trình duyệt. Vui lòng đăng nhập Claude.ai...')
     socketRef.current.emit('init_browser', { profileId })
+  }
+
+  const handleRepairChromium = (profileId = activeProfileId) => {
+    if (!socketRef.current) {
+      setGlobalStatus('Socket chưa sẵn sàng.')
+      return
+    }
+
+    setBrowserRepairing(true)
+    setPhase((previous) => (previous === 'workspace' ? previous : 'login'))
+    setProfileError('')
+    setGlobalStatus('Đang tự sửa lỗi Chromium...')
+    socketRef.current.emit('repair_chromium', { profileId })
   }
 
   const handleStartPipeline = (config) => {
@@ -1133,6 +1168,18 @@ function App() {
               >
                 Kết nối trình duyệt
               </button>
+              <button
+                type="button"
+                className={styles.repairButton}
+                onClick={() => handleRepairChromium()}
+                disabled={browserRepairing}
+              >
+                <Wrench size={16} />
+                <span>{browserRepairing ? 'Đang sửa Chromium...' : 'Sửa lỗi Chromium'}</span>
+              </button>
+              {profileError && (
+                <p className={styles.browserErrorText}>{profileError}</p>
+              )}
             </div>
           </section>
         )}
@@ -1146,6 +1193,15 @@ function App() {
                 Hãy hoàn tất đăng nhập trong cửa sổ Chromium vừa mở. Danh sách
                 project sẽ tự động hiện ở bước kế tiếp.
               </p>
+              <button
+                type="button"
+                className={styles.repairButton}
+                onClick={() => handleRepairChromium()}
+                disabled={browserRepairing}
+              >
+                <Wrench size={16} />
+                <span>{browserRepairing ? 'Đang sửa Chromium...' : 'Chromium không hiện? Sửa lỗi'}</span>
+              </button>
             </div>
           </section>
         )}
