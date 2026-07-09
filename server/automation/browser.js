@@ -1,5 +1,6 @@
 const { chromium } = require('playwright');
 const { execFile } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 
 const DATA_ROOT_DIR = process.env.SCRIPTFORGE_DATA_DIR || path.join(__dirname, '..');
@@ -7,6 +8,50 @@ const BROWSER_USER_DATA_DIR = path.join(DATA_ROOT_DIR, 'browser-data');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    clearTimeout(timeoutId);
+  });
+}
+
+function findBundledChromiumExecutable() {
+  const appRoot = path.join(__dirname, '..');
+  const browserRoots = [
+    path.join(appRoot, 'node_modules', 'playwright-core', '.local-browsers'),
+    path.join(appRoot, 'node_modules', 'playwright', '.local-browsers'),
+  ];
+
+  for (const browserRoot of browserRoots) {
+    if (!fs.existsSync(browserRoot)) {
+      continue;
+    }
+
+    const chromiumDirs = fs.readdirSync(browserRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => /^chromium-\d+/i.test(name))
+      .sort()
+      .reverse();
+
+    for (const chromiumDir of chromiumDirs) {
+      const executablePath = path.join(browserRoot, chromiumDir, 'chrome-win64', 'chrome.exe');
+
+      if (fs.existsSync(executablePath)) {
+        return executablePath;
+      }
+    }
+  }
+
+  return '';
 }
 
 function isProfileAlreadyOpenError(error) {
@@ -27,6 +72,15 @@ function toFriendlyBrowserLaunchError(error) {
       'Profile Chromium automation đang mở hoặc bị khóa. Hãy đóng cửa sổ Chromium cũ rồi bấm Kết nối browser lại.'
     );
     friendlyError.code = 'BROWSER_PROFILE_LOCKED';
+    friendlyError.cause = error;
+    return friendlyError;
+  }
+
+  if (/Timed out launching bundled Chromium/i.test(error?.message || '')) {
+    const friendlyError = new Error(
+      'Không mở được Chromium sau 60 giây. Máy này có thể đang bị antivirus/Windows Security chặn chrome.exe trong thư mục portable, hoặc file portable chưa được giải nén đầy đủ. Hãy giải nén lại zip, bỏ chặn thư mục ScriptForge-win32-x64, rồi mở lại app.'
+    );
+    friendlyError.code = 'BROWSER_LAUNCH_TIMEOUT';
     friendlyError.cause = error;
     return friendlyError;
   }
@@ -132,16 +186,31 @@ do {
 }
 
 async function createPersistentContext(userDataDir) {
+  const executablePath = findBundledChromiumExecutable();
   const args = [
+    '--no-first-run',
+    '--no-default-browser-check',
     '--disable-blink-features=AutomationControlled',
   ];
-
-  return chromium.launchPersistentContext(userDataDir, {
+  const launchOptions = {
     headless: false,
     viewport: null,
     args,
     ignoreDefaultArgs: ['--enable-automation'],
-  });
+  };
+
+  if (executablePath) {
+    console.log('[Browser] Using bundled Chromium executable:', executablePath);
+    launchOptions.executablePath = executablePath;
+  } else {
+    console.warn('[Browser] Bundled Chromium executable not found. Falling back to Playwright registry resolution.');
+  }
+
+  return withTimeout(
+    chromium.launchPersistentContext(userDataDir, launchOptions),
+    60000,
+    'Timed out launching bundled Chromium.'
+  );
 }
 
 function isClaudePage(page) {

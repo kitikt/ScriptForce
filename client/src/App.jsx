@@ -889,9 +889,7 @@ function App() {
 
       if (!pipelineId) {
         setGlobalStatus(message)
-        if (message.toLowerCase().includes('browser')) {
-          setPhase('init')
-        }
+        setPhase((previous) => (previous === 'login' ? 'init' : previous))
         return
       }
 
