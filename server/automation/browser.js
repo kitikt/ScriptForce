@@ -30,14 +30,35 @@ function createFriendlyBrowserError(message, code, cause = null) {
   return error;
 }
 
-function findBundledChromiumExecutable() {
-  const appRoot = path.join(__dirname, '..');
-  const browserRoots = [
-    path.join(appRoot, 'node_modules', 'playwright-core', '.local-browsers'),
-    path.join(appRoot, 'node_modules', 'playwright', '.local-browsers'),
+function getPackagedAppRoot() {
+  return path.resolve(__dirname, '..', '..');
+}
+
+function getCandidateAppRoots() {
+  const roots = [
+    getPackagedAppRoot(),
+    path.resolve(__dirname, '..'),
+    process.cwd(),
   ];
 
+  if (process.resourcesPath) {
+    roots.push(path.join(process.resourcesPath, 'app'));
+  }
+
+  return [...new Set(roots.filter(Boolean))];
+}
+
+function findBundledChromiumExecutable() {
+  const browserRoots = getCandidateAppRoots()
+    .flatMap((appRoot) => [
+      path.join(appRoot, 'node_modules', 'playwright-core', '.local-browsers'),
+      path.join(appRoot, 'node_modules', 'playwright', '.local-browsers'),
+    ]);
+  const checkedRoots = [];
+
   for (const browserRoot of browserRoots) {
+    checkedRoots.push(browserRoot);
+
     if (!fs.existsSync(browserRoot)) {
       continue;
     }
@@ -58,6 +79,7 @@ function findBundledChromiumExecutable() {
     }
   }
 
+  console.warn('[Browser] Bundled Chromium executable not found. Checked:', checkedRoots.join(' | '));
   return '';
 }
 
@@ -231,7 +253,7 @@ async function clearProfileLockFiles(userDataDir) {
 
 function unblockPortableFiles() {
   return new Promise((resolve) => {
-    const appRoot = path.join(__dirname, '..');
+    const appRoot = getPackagedAppRoot();
     const escapedRoot = appRoot.replace(/'/g, "''");
     const command = `
 $root = '${escapedRoot}'
