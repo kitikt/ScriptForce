@@ -1356,6 +1356,109 @@ async function findModelFamilyOption(page, modelName) {
   return matches[0]?.candidate || null;
 }
 
+async function waitForModelSelectorOpen(page, timeoutMs = 5000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const menuIndicator = await findFirstVisibleLocator([
+      page.getByRole('menuitem', { name: /More models/i }),
+      page.getByRole('button', { name: /More models/i }),
+      page.locator('[role="menuitem"], [role="option"], button').filter({
+        hasText: /Fable|Opus|Sonnet|Haiku|More models|Effort/i,
+      }),
+    ]);
+
+    if (menuIndicator) {
+      return true;
+    }
+
+    await sleep(100);
+  }
+
+  return false;
+}
+
+async function hasExactModelTextVisible(page, modelName) {
+  return page.evaluate((targetName) => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const expected = normalize(targetName).toLowerCase();
+
+    if (!expected) {
+      return false;
+    }
+
+    const isVisible = (element) => {
+      if (!element) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number(style.opacity || 1) > 0
+      );
+    };
+
+    const getLines = (element) => {
+      const raw = String(element.innerText || element.textContent || '');
+      const lines = raw
+        .split('\n')
+        .map(normalize)
+        .filter(Boolean);
+      const compact = normalize(raw);
+
+      if (compact && !lines.includes(compact)) {
+        lines.push(compact);
+      }
+
+      return lines;
+    };
+
+    return Array.from(document.querySelectorAll(
+      'button, [role="option"], [role="menuitem"], [role="button"], [data-radix-collection-item], [data-base-ui-collection-item], [cmdk-item], div, span'
+    )).some((element) => {
+      if (!isVisible(element) || element.closest('[contenteditable="true"]')) {
+        return false;
+      }
+
+      const text = normalize(element.innerText || element.textContent);
+
+      if (text.length > 240) {
+        return false;
+      }
+
+      return getLines(element)
+        .map((line) => line.toLowerCase())
+        .some((line) =>
+          line === expected ||
+          line.startsWith(`${expected} `) ||
+          line.includes(` ${expected} `)
+        );
+    });
+  }, modelName).catch(() => false);
+}
+
+async function waitForExactModelOption(page, modelName, timeoutMs = 4000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const locator = await findExactModelOption(page, modelName);
+
+    if (locator || await hasExactModelTextVisible(page, modelName)) {
+      return locator || true;
+    }
+
+    await sleep(100);
+  }
+
+  return null;
+}
+
 async function clickExactModelOptionByText(page, modelName) {
   const clicked = await page.evaluate((targetName) => {
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -1466,6 +1569,18 @@ async function clickExactModelOptionByText(page, modelName) {
   return clicked;
 }
 
+async function clickExactVisibleModelOption(page, modelName) {
+  const modelOption = await findExactModelOption(page, modelName);
+
+  if (modelOption) {
+    console.log('[Claude] Clicking exact model option...');
+    return clickClaudeUi(modelOption, page, `model option ${modelName}`);
+  }
+
+  console.log(`[Claude] Exact model locator not found for: ${modelName}. Trying text fallback...`);
+  return clickExactModelOptionByText(page, modelName);
+}
+
 async function verifySelectedModel(page, modelName, timeoutMs = 5000) {
   const modelPatternSource = getModelNameMatcherSource(modelName);
   const familyPatternSource = getModelFamilyMatcherSource(modelName);
@@ -1533,9 +1648,9 @@ async function openMoreModelsMenu(page, modelName) {
   }
 
   await moreModels.hover().catch(() => {});
-  await sleep(500);
+  await waitForExactModelOption(page, modelName, 2500);
 
-  if (await findExactModelOption(page, modelName)) {
+  if (await hasExactModelTextVisible(page, modelName)) {
     return true;
   }
 
@@ -1543,16 +1658,16 @@ async function openMoreModelsMenu(page, modelName) {
     return false;
   }
 
-  await sleep(500);
+  await waitForExactModelOption(page, modelName, 2500);
 
-  if (await findExactModelOption(page, modelName)) {
+  if (await hasExactModelTextVisible(page, modelName)) {
     return true;
   }
 
   await moreModels.hover().catch(() => {});
-  await sleep(500);
+  await waitForExactModelOption(page, modelName, 2500);
 
-  return Boolean(await findExactModelOption(page, modelName));
+  return hasExactModelTextVisible(page, modelName);
 }
 
 async function selectModel(page, modelName, options = {}) {
@@ -1568,37 +1683,29 @@ async function selectModel(page, modelName, options = {}) {
 
     console.log('[Claude] Opening model selector...');
     await clickClaudeUi(modelButton, page, 'model selector');
-    await randomDelay();
+    await waitForModelSelectorOpen(page);
 
-    let modelOption = await findExactModelOption(page, modelName);
+    let clickedModel = await clickExactVisibleModelOption(page, modelName);
 
-    if (!modelOption) {
+    if (!clickedModel) {
       console.log(`[Claude] Exact ${modelName} not visible. Opening More models...`);
       if (await openMoreModelsMenu(page, modelName)) {
-        await randomDelay(400, 900);
-        modelOption = await findExactModelOption(page, modelName);
+        clickedModel = await clickExactVisibleModelOption(page, modelName);
       }
     }
 
-    if (!modelOption && !hasExplicitModelVersion(modelName) && getModelFamily(modelName)) {
+    if (!clickedModel && !hasExplicitModelVersion(modelName) && getModelFamily(modelName)) {
       console.log(`[Claude] Exact model not visible. Trying ${getModelFamily(modelName)} family option...`);
-      modelOption = await findModelFamilyOption(page, modelName);
+      const familyOption = await findModelFamilyOption(page, modelName);
+      clickedModel = familyOption
+        ? await clickClaudeUi(familyOption, page, `model option ${modelName}`)
+        : false;
     }
 
-    if (!modelOption) {
-      console.warn(`[Claude] Exact model locator not found for: ${modelName}. Trying text fallback...`);
-      if (!await clickExactModelOptionByText(page, modelName)) {
-        console.warn(`[Claude] Model option not found for: ${modelName}`);
-        await page.keyboard.press('Escape').catch(() => {});
-        return false;
-      }
-    } else {
-      console.log('[Claude] Clicking model option...');
-      if (!await clickClaudeUi(modelOption, page, `model option ${modelName}`)) {
-        await page.keyboard.press('Escape').catch(() => {});
-        return false;
-      }
-      await randomDelay();
+    if (!clickedModel) {
+      console.warn(`[Claude] Model option not found for: ${modelName}`);
+      await page.keyboard.press('Escape').catch(() => {});
+      return false;
     }
 
     if (!await verifySelectedModel(page, modelName, 5000)) {
