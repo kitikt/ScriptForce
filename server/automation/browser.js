@@ -154,10 +154,12 @@ function verifyBundledChromiumExecutable(executablePath) {
   });
 }
 
-function createLaunchOptions(executablePath) {
+function createLaunchOptions(executablePath, options = {}) {
+  const headless = Boolean(options.headless);
+
   return {
-    headless: false,
-    viewport: null,
+    headless,
+    viewport: headless ? { width: 1280, height: 720 } : null,
     executablePath,
     args: [
       '--no-first-run',
@@ -166,6 +168,9 @@ function createLaunchOptions(executablePath) {
       '--disable-gpu',
       '--disable-dev-shm-usage',
       '--disable-features=CalculateNativeWinOcclusion',
+      '--disable-infobars',
+      '--disable-session-crashed-bubble',
+      '--hide-crash-restore-bubble',
     ],
     ignoreDefaultArgs: ['--enable-automation'],
   };
@@ -180,7 +185,7 @@ async function smokeTestChromiumLaunch(executablePath) {
 
   try {
     context = await withTimeout(
-      chromium.launchPersistentContext(smokeDir, createLaunchOptions(executablePath)),
+      chromium.launchPersistentContext(smokeDir, createLaunchOptions(executablePath, { headless: true })),
       30000,
       'Timed out launching Chromium with a clean temporary profile.'
     );
@@ -511,7 +516,14 @@ function isClaudePage(page) {
 function isBlankPage(page) {
   try {
     const url = page.url();
-    return url === 'about:blank' || url === 'chrome://new-tab-page/';
+    return (
+      url === 'about:blank' ||
+      url === 'chrome://newtab/' ||
+      url === 'chrome://new-tab-page/' ||
+      url === 'chrome://new-tab-page' ||
+      url.startsWith('chrome://new-tab-page-third-party/') ||
+      url.startsWith('edge://newtab')
+    );
   } catch {
     return false;
   }
