@@ -154,6 +154,19 @@ function verifyBundledChromiumExecutable(executablePath) {
   });
 }
 
+async function getBundledChromiumPreflightStatus(executablePath) {
+  try {
+    await verifyBundledChromiumExecutable(executablePath);
+    return { ok: true, error: '' };
+  } catch (error) {
+    console.warn('[Browser] Bundled Chromium --version preflight failed, continuing with Playwright launch test:', error.message);
+    return {
+      ok: false,
+      error: error.message,
+    };
+  }
+}
+
 function createLaunchOptions(executablePath, options = {}) {
   const headless = Boolean(options.headless);
 
@@ -252,7 +265,14 @@ async function quarantineProfileDir(userDataDir) {
 
 async function recoverProfileAndCreateContext(userDataDir, originalError) {
   const executablePath = findBundledChromiumExecutable();
-  await verifyBundledChromiumExecutable(executablePath);
+  if (!executablePath) {
+    throw createFriendlyBrowserError(
+      getChromiumPreflightFailureMessage(null, executablePath),
+      'BUNDLED_CHROMIUM_NOT_FOUND'
+    );
+  }
+
+  await getBundledChromiumPreflightStatus(executablePath);
 
   try {
     await smokeTestChromiumLaunch(executablePath);
@@ -466,7 +486,7 @@ async function createPersistentContext(userDataDir) {
 
   if (executablePath) {
     console.log('[Browser] Using bundled Chromium executable:', executablePath);
-    await verifyBundledChromiumExecutable(executablePath);
+    await getBundledChromiumPreflightStatus(executablePath);
   } else {
     throw createFriendlyBrowserError(
       getChromiumPreflightFailureMessage(null, executablePath),
@@ -491,8 +511,16 @@ async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
   const removedLocks = await clearProfileLockFiles(userDataDir);
   const unblockResult = await unblockPortableFiles();
   const executablePath = findBundledChromiumExecutable();
+  let preflightStatus = { ok: false, error: '' };
 
-  await verifyBundledChromiumExecutable(executablePath);
+  if (!executablePath) {
+    throw createFriendlyBrowserError(
+      getChromiumPreflightFailureMessage(null, executablePath),
+      'BUNDLED_CHROMIUM_NOT_FOUND'
+    );
+  }
+
+  preflightStatus = await getBundledChromiumPreflightStatus(executablePath);
   await smokeTestChromiumLaunch(executablePath);
 
   return {
@@ -502,6 +530,8 @@ async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
     unblockedFiles: unblockResult.count,
     unblockOk: unblockResult.ok,
     unblockError: unblockResult.error,
+    preflightOk: preflightStatus.ok,
+    preflightError: preflightStatus.error,
   };
 }
 
