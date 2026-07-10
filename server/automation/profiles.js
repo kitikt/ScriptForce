@@ -117,20 +117,6 @@ async function getActiveProfile() {
   };
 }
 
-async function getProfile(profileId) {
-  const state = await readProfilesState();
-  const profile = state.profiles.find((candidate) => candidate.id === profileId);
-
-  if (!profile) {
-    throw new Error('Claude profile not found.');
-  }
-
-  return {
-    state,
-    profile,
-  };
-}
-
 async function createProfile(label) {
   const state = await readProfilesState();
   const id = `profile_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
@@ -216,7 +202,6 @@ module.exports = {
   createProfile,
   deleteProfile,
   getActiveProfile,
-  getProfile,
   getProfilesState,
   renameProfile,
   switchProfile,

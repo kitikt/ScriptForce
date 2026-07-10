@@ -138,16 +138,7 @@ function normalizeSteps(steps) {
     }))
 }
 
-function ConfigPanel({
-  profiles = [],
-  defaultProfileId = '',
-  profileSessions = {},
-  projectsByProfile = {},
-  onConnectProfile,
-  onStart,
-  startDisabled = false,
-}) {
-  const [selectedProfileId, setSelectedProfileId] = useState(defaultProfileId)
+function ConfigPanel({ projects, onStart }) {
   const [projectUrl, setProjectUrl] = useState('')
   const [templates, setTemplates] = useState([])
   const [selectedTemplateId, setSelectedTemplateId] = useState('')
@@ -159,24 +150,11 @@ function ConfigPanel({
   const [isSavingTemplate, setIsSavingTemplate] = useState(false)
   const [isEditingTemplateName, setIsEditingTemplateName] = useState(false)
 
-  const selectedProfile =
-    profiles.find((profile) => profile.id === selectedProfileId) ||
-    profiles.find((profile) => profile.id === defaultProfileId) ||
-    profiles[0]
-  const effectiveProfileId = selectedProfile?.id || ''
-  const selectedSession = profileSessions[effectiveProfileId] || {}
-  const projects = projectsByProfile[effectiveProfileId] || selectedSession.projects || []
   const effectiveProjectUrl = projectUrl || (projects.length === 1 ? projects[0].url : '')
   const steps = templateDraft.steps || []
   const activeStep = steps[activeStepIndex] || steps[0]
   const hasInvalidStep = steps.some((step) => !step.name.trim() || !step.prompt.trim())
-  const isDisabled =
-    !effectiveProfileId ||
-    !effectiveProjectUrl ||
-    !originalScript.trim() ||
-    steps.length === 0 ||
-    hasInvalidStep
-  const isStartBlocked = isDisabled || isSavingTemplate || startDisabled
+  const isDisabled = !effectiveProjectUrl || !originalScript.trim() || steps.length === 0 || hasInvalidStep
 
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.id === selectedTemplateId),
@@ -186,30 +164,6 @@ function ConfigPanel({
     value: project.url,
     label: project.name,
   }))
-  const profileOptions = profiles.map((profile) => {
-    const session = profileSessions[profile.id] || {}
-    let statusLabel = 'Chưa kết nối'
-
-    if (session.usageBlock) {
-      statusLabel = session.usageBlock.resetText
-        ? `Hết usage · ${session.usageBlock.resetText}`
-        : `Hết usage · ${session.usageBlock.usedPercent}%`
-    } else if (session.responseBusy) {
-      statusLabel = session.waitingResponses > 0
-        ? `Đang tạo phản hồi · ${session.waitingResponses} pipeline chờ`
-        : 'Đang tạo phản hồi'
-    } else if (session.connected) {
-      statusLabel = 'Đã kết nối'
-    } else if (session.status === 'connecting') {
-      statusLabel = 'Đang kết nối'
-    }
-
-    return {
-      value: profile.id,
-      label: profile.label,
-      description: statusLabel,
-    }
-  })
   const templateOptions = templates.map((template) => ({
     value: template.id,
     label: template.name,
@@ -426,8 +380,6 @@ function ConfigPanel({
       .filter((step) => step.name && step.prompt)
 
     onStart({
-      profileId: effectiveProfileId,
-      profileLabel: selectedProfile?.label || '',
       templateId: savedTemplate?.id || selectedTemplateId || null,
       templateName: savedTemplate?.name || templateDraft.name.trim(),
       originalScript: originalScript.trim(),
@@ -447,38 +399,6 @@ function ConfigPanel({
     <section className="mx-auto flex max-w-2xl flex-col gap-6 p-8">
       <div className={sectionClass}>
         <div>
-          <h2 className="text-lg font-bold text-white">Tài khoản chạy pipeline</h2>
-          <p className="text-sm text-gray-400">
-            Pipeline luôn gắn với tài khoản này, kể cả khi bạn chuyển sang tài khoản khác.
-          </p>
-        </div>
-
-        <PrettyDropdown
-          value={effectiveProfileId}
-          options={profileOptions}
-          placeholder="Chọn tài khoản Claude..."
-          onChange={(profileId) => {
-            setSelectedProfileId(profileId)
-            setProjectUrl('')
-          }}
-        />
-
-        {!selectedSession.connected && (
-          <button
-            type="button"
-            className={`mt-3 w-full rounded-xl border border-[#c4a1ff]/45 bg-[#c4a1ff]/12 p-3 text-sm font-bold text-[#eadcff] ${glowButtonClass}`}
-            onClick={() => onConnectProfile?.(effectiveProfileId)}
-            disabled={!effectiveProfileId || selectedSession.status === 'connecting'}
-          >
-            {selectedSession.status === 'connecting'
-              ? 'Đang kết nối tài khoản...'
-              : 'Kết nối tài khoản này'}
-          </button>
-        )}
-      </div>
-
-      <div className={sectionClass}>
-        <div>
           <h2 className="text-lg font-bold text-white">Chọn project</h2>
           <p className="text-sm text-gray-400">Chọn Claude project nơi pipeline sẽ chạy.</p>
         </div>
@@ -488,7 +408,6 @@ function ConfigPanel({
           options={projectOptions}
           placeholder="Chọn project..."
           onChange={setProjectUrl}
-          disabled={!selectedSession.connected}
         />
       </div>
 
@@ -756,11 +675,11 @@ function ConfigPanel({
       <button
         type="button"
         className={`w-full rounded-xl p-4 text-lg font-bold transition duration-200 ${
-          isStartBlocked
+          isDisabled || isSavingTemplate
             ? 'cursor-not-allowed bg-gray-700/70 text-gray-400'
             : 'bg-gradient-to-r from-[#f3e8ff] via-[#c4a1ff] to-[#9f7aea] text-[#2f174a] shadow-[0_4px_20px_rgba(196,161,255,0.34)] hover:scale-[1.02] hover:brightness-110'
         }`}
-        disabled={isStartBlocked}
+        disabled={isDisabled || isSavingTemplate}
         onClick={handleSubmit}
       >
         {isSavingTemplate ? 'Đang lưu template...' : 'Bắt đầu pipeline'}

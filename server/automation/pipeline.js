@@ -163,8 +163,14 @@ function buildPromptForStep(step, config) {
 }
 
 async function randomStepDelay(runtime = {}, options = {}) {
-  void runtime;
-  void options;
+  const stepNumber = Number(options.stepNumber || 0);
+  const hasArtifact = Array.isArray(options.artifacts) && options.artifacts.length > 0;
+  const longCooldown = stepNumber >= 7 || hasArtifact;
+  const minMs = longCooldown ? 45000 : 5000;
+  const maxMs = longCooldown ? 75000 : 15000;
+  const delayMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+  console.log(`[Pipeline] Waiting ${delayMs}ms before next step...`);
+  await sleepUntil(delayMs, runtime);
 }
 
 function emitSocketEvent(socket, eventName, payload) {
@@ -272,18 +278,7 @@ function isClaudeTooManyChatsError(error) {
   return error?.code === 'CLAUDE_TOO_MANY_CHATS' ||
     /looks like you have too many chats going\.?\s*please close a tab to continue\.?/i.test(
       error?.message || ''
-    ) ||
-    /too many responses are running at once/i.test(error?.message || '') ||
-    /you can stop a response or wait for one to finish, then try again/i.test(
-      error?.message || ''
     );
-}
-
-function isClaudeUsageLimitError(error) {
-  return error?.code === 'CLAUDE_USAGE_LIMIT' ||
-    /5-hour limit reached\s*[-·]?\s*resets?/i.test(error?.message || '') ||
-    /you(?:'|’)?ve hit your limit/i.test(error?.message || '') ||
-    /you have reached your message limit/i.test(error?.message || '');
 }
 
 function isRetriableStepError(error) {
@@ -361,12 +356,6 @@ async function executeStep(page, step, config, socket, runtime = {}) {
         stepNumber,
         stepName,
         minResponseChars,
-        pipelineId,
-        shouldStop: runtime.shouldStop,
-        onWait(message) {
-          emitStatus(socket, message, pipelineId);
-          emitLog(socket, message, pipelineId);
-        },
       });
       throwIfStopped(runtime);
       emitLog(socket, 'Đã gửi tin nhắn và nhận phản hồi.', pipelineId);
@@ -378,34 +367,20 @@ async function executeStep(page, step, config, socket, runtime = {}) {
         throw new PipelineStoppedError();
       }
 
-      if (isClaudeTooManyChatsError(error) || isClaudeUsageLimitError(error)) {
+      if (isClaudeTooManyChatsError(error)) {
         tooManyChatsRetryCount += 1;
-        emitLog(
-          socket,
-          isClaudeUsageLimitError(error)
-            ? `Claude báo tài khoản đã hết usage. Pipeline giữ nguyên tại bước ${stepNumber} và đang chờ reset.`
-            : `Claude báo đang có quá nhiều phản hồi hoặc account có thể đã hết usage. Đang kiểm tra trước khi thử lại đúng bước ${stepNumber}.`,
-          pipelineId
-        );
-        if (page && typeof page.waitForAccountReady === 'function') {
-          await page.waitForAccountReady(error, {
-            pipelineId,
-            modelName: config.modelName,
-            retryCount: tooManyChatsRetryCount,
-            shouldStop: runtime.shouldStop,
-            onWait(message) {
-              emitStatus(socket, message, pipelineId);
-              emitLog(socket, message, pipelineId);
-            },
-          });
-        } else {
-          await sleepUntil(Math.min(60000, tooManyChatsRetryCount * 10000), runtime);
-        }
+        const retryDelayMs = Math.floor(Math.random() * 1001) + 1000;
         emitStatus(
           socket,
-          `Tài khoản đã sẵn sàng. Đang thử lại đúng bước ${stepNumber}...`,
+          `Claude dang gioi han chat. Dang gui lai buoc ${stepNumber} sau ${Math.round(retryDelayMs / 100) / 10} giay...`,
           pipelineId
         );
+        emitLog(
+          socket,
+          `Claude bao "Looks like you have too many chats going". Dang gui lai dung prompt buoc ${stepNumber}, lan ${tooManyChatsRetryCount}.`,
+          pipelineId
+        );
+        await sleepUntil(retryDelayMs, runtime);
         continue;
       }
 
@@ -697,7 +672,12 @@ async function runPipeline(page, config, socket, runtime = {}) {
         }
 
         if (stepNumber < pipelineSteps.length) {
+          emitLog(socket, 'Đang chờ trước khi sang bước tiếp theo...', pipelineId);
           emitUrlLog(socket, provider, pipelineId);
+          await randomStepDelay(runtime, {
+            stepNumber,
+            artifacts,
+          });
         }
       } catch (error) {
         if (isPipelineStoppedError(error) || shouldStop()) {

@@ -142,43 +142,6 @@
   filter: brightness(1.06);
 }
 
-.repairButton {
-  margin-top: 1rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  border: 1px solid rgba(222, 204, 255, 0.24);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #dccbff;
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  padding: 0.85rem 1.1rem;
-  cursor: pointer;
-  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
-}
-
-.repairButton:hover:not(:disabled) {
-  transform: translateY(-1px);
-  border-color: rgba(196, 161, 255, 0.7);
-  background: rgba(196, 161, 255, 0.14);
-  box-shadow: 0 0 22px rgba(196, 161, 255, 0.2);
-}
-
-.repairButton:disabled {
-  cursor: wait;
-  opacity: 0.65;
-}
-
-.browserErrorText {
-  margin: 1rem 0 0;
-  color: #fca5a5;
-  line-height: 1.55;
-  font-size: 0.88rem;
-  white-space: pre-wrap;
-}
-
 .configStage {
   max-width: 1080px;
   height: 100%;
@@ -711,57 +674,6 @@
   padding-right: 0.15rem;
 }
 
-.pipelineGroup {
-  display: grid;
-  gap: 0.55rem;
-}
-
-.pipelineGroup + .pipelineGroup {
-  margin-top: 0.25rem;
-  padding-top: 0.8rem;
-  border-top: 1px solid rgba(222, 204, 255, 0.12);
-}
-
-.pipelineGroupHeader {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.45rem;
-  min-height: 1.6rem;
-  padding: 0 0.2rem;
-}
-
-.pipelineGroupHeader strong {
-  overflow: hidden;
-  color: #e7dbff;
-  font-size: 0.76rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pipelineGroupHeader small {
-  color: #8f9ab6;
-  font-size: 0.66rem;
-}
-
-.profileStatusDot {
-  width: 0.48rem;
-  height: 0.48rem;
-  border-radius: 999px;
-  background: #667085;
-  box-shadow: 0 0 0 3px rgba(102, 112, 133, 0.1);
-}
-
-.profileStatusConnected {
-  background: #34d399;
-  box-shadow: 0 0 12px rgba(52, 211, 153, 0.5);
-}
-
-.pipelineGroupList {
-  display: grid;
-  gap: 0.55rem;
-}
-
 .emptyPipelineList {
   display: flex;
   align-items: center;
@@ -843,11 +755,6 @@
 .review {
   background: rgba(196, 161, 255, 0.18);
   color: #c4a1ff;
-}
-
-.waiting {
-  background: rgba(234, 179, 8, 0.16);
-  color: #facc15;
 }
 
 .done {
