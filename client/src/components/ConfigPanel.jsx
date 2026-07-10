@@ -145,6 +145,7 @@ function ConfigPanel({
   projectsByProfile = {},
   onConnectProfile,
   onStart,
+  startDisabled = false,
 }) {
   const [selectedProfileId, setSelectedProfileId] = useState(defaultProfileId)
   const [projectUrl, setProjectUrl] = useState('')
@@ -175,6 +176,7 @@ function ConfigPanel({
     !originalScript.trim() ||
     steps.length === 0 ||
     hasInvalidStep
+  const isStartBlocked = isDisabled || isSavingTemplate || startDisabled
 
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.id === selectedTemplateId),
@@ -754,11 +756,11 @@ function ConfigPanel({
       <button
         type="button"
         className={`w-full rounded-xl p-4 text-lg font-bold transition duration-200 ${
-          isDisabled || isSavingTemplate
+          isStartBlocked
             ? 'cursor-not-allowed bg-gray-700/70 text-gray-400'
             : 'bg-gradient-to-r from-[#f3e8ff] via-[#c4a1ff] to-[#9f7aea] text-[#2f174a] shadow-[0_4px_20px_rgba(196,161,255,0.34)] hover:scale-[1.02] hover:brightness-110'
         }`}
-        disabled={isDisabled || isSavingTemplate}
+        disabled={isStartBlocked}
         onClick={handleSubmit}
       >
         {isSavingTemplate ? 'Đang lưu template...' : 'Bắt đầu pipeline'}

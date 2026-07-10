@@ -504,6 +504,7 @@ function App() {
   const [profilesState, setProfilesState] = useState({ activeProfileId: null, profiles: [] })
   const [profileError, setProfileError] = useState('')
   const [browserRepairing, setBrowserRepairing] = useState(false)
+  const [pipelineStartPending, setPipelineStartPending] = useState(false)
   const [activeCapacity, setActiveCapacity] = useState({
     activeCount: 0,
     maxActivePipelines: DEFAULT_MAX_ACTIVE_PIPELINES,
@@ -583,11 +584,13 @@ function App() {
     })
 
     socket.on('disconnect', (reason) => {
+      setPipelineStartPending(false)
       setGlobalStatus(`Mất kết nối Socket.IO (${reason}). Vui lòng thử lại bằng Kết nối trình duyệt.`)
       setPhase((previous) => (previous === 'workspace' ? previous : 'init'))
     })
 
     socket.on('connect_error', () => {
+      setPipelineStartPending(false)
       setGlobalStatus('Không thể kết nối tới server localhost:3001. Hãy kiểm tra backend rồi thử lại.')
       setPhase('init')
     })
@@ -647,15 +650,45 @@ function App() {
         return
       }
 
+      setPipelineStartPending(false)
       setActiveCapacity({
         activeCount: activeCount ?? 0,
         maxActivePipelines: maxActivePipelines ?? DEFAULT_MAX_ACTIVE_PIPELINES,
       })
-      setPipelines((previous) => [...previous, createPipelineFromJob(job)])
+      setPipelines((previous) => {
+        const nextPipeline = createPipelineFromJob(job)
+
+        if (previous.some((pipeline) => pipeline.id === job.pipelineId)) {
+          return updatePipeline(previous, job.pipelineId, () => nextPipeline)
+        }
+
+        return [...previous, nextPipeline]
+      })
       setSelectedPipelineId(job.pipelineId)
       setShowConfig(false)
       setPhase('workspace')
       setGlobalStatus(`Pipeline "${job.config?.chatName || job.pipelineId}" đã bắt đầu.`)
+    })
+
+    socket.on('pipeline_job_update', ({ job, activeCount, maxActivePipelines }) => {
+      if (!job?.pipelineId) {
+        return
+      }
+
+      setActiveCapacity({
+        activeCount: activeCount ?? 0,
+        maxActivePipelines: maxActivePipelines ?? DEFAULT_MAX_ACTIVE_PIPELINES,
+      })
+      setPipelines((previous) => {
+        const nextPipeline = createPipelineFromJob(job)
+
+        if (previous.some((pipeline) => pipeline.id === job.pipelineId)) {
+          return updatePipeline(previous, job.pipelineId, () => nextPipeline)
+        }
+
+        return [...previous, nextPipeline]
+      })
+      setSelectedPipelineId((previous) => previous || job.pipelineId)
     })
 
     socket.on('pipeline_capacity', (payload) => {
@@ -666,6 +699,7 @@ function App() {
     })
 
     socket.on('pipeline_rejected', (payload) => {
+      setPipelineStartPending(false)
       setGlobalStatus(payload?.error || 'Pipeline bị từ chối.')
     })
 
@@ -907,6 +941,7 @@ function App() {
       const message = getCompactMessage(payload?.error || 'Có lỗi xảy ra.', pipelineId ? 260 : 900)
 
       if (!pipelineId) {
+        setPipelineStartPending(false)
         setGlobalStatus(message)
         setProfileError(message)
         setBrowserRepairing(false)
@@ -966,12 +1001,18 @@ function App() {
       return
     }
 
+    if (pipelineStartPending) {
+      setGlobalStatus('Dang tao pipeline moi. Vui long cho server phan hoi.')
+      return
+    }
+
     if (!canStartPipeline) {
       setGlobalStatus(`Đang đạt giới hạn ${maxActivePipelines} pipeline chạy song song.`)
       return
     }
 
     setGlobalStatus('Đang tạo pipeline mới...')
+    setPipelineStartPending(true)
     socketRef.current.emit('start_pipeline', config)
   }
 
@@ -1228,6 +1269,7 @@ function App() {
               projectsByProfile={projectsByProfile}
               onConnectProfile={handleConnectBrowser}
               onStart={handleStartPipeline}
+              startDisabled={pipelineStartPending}
             />
           </section>
         )}
@@ -1351,6 +1393,7 @@ function App() {
                     projectsByProfile={projectsByProfile}
                     onConnectProfile={handleConnectBrowser}
                     onStart={handleStartPipeline}
+                    startDisabled={pipelineStartPending}
                   />
                 </div>
               ) : selectedPipeline ? (

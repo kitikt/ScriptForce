@@ -10,19 +10,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withTimeout(promise, timeoutMs, message) {
-  let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(message));
-    }, timeoutMs);
-  });
-
-  return Promise.race([promise, timeout]).finally(() => {
-    clearTimeout(timeoutId);
-  });
-}
-
 function getErrorDetails(error) {
   return [
     error?.message,
@@ -121,94 +108,17 @@ function getChromiumPreflightFailureMessage(error, executablePath) {
   return `Không chạy được Chromium bundled trên máy này. ${executableLine} Cách sửa nhanh: giải nén lại zip vào thư mục ngắn như C:\\ScriptForge, Allow trong Windows Security nếu bị chặn, cài Microsoft Visual C++ Redistributable 2015-2022 x64, rồi mở lại app. Chi tiết: ${details}`;
 }
 
-function verifyBundledChromiumExecutable(executablePath) {
-  return new Promise((resolve, reject) => {
-    if (!executablePath) {
-      reject(createFriendlyBrowserError(
-        getChromiumPreflightFailureMessage(null, executablePath),
-        'BUNDLED_CHROMIUM_NOT_FOUND'
-      ));
-      return;
-    }
-
-    execFile(
-      executablePath,
-      ['--version'],
-      { timeout: 15000, windowsHide: true },
-      (error, stdout, stderr) => {
-        if (error) {
-          error.stdout = stdout;
-          error.stderr = stderr;
-          reject(createFriendlyBrowserError(
-            getChromiumPreflightFailureMessage(error, executablePath),
-            'BUNDLED_CHROMIUM_PREFLIGHT_FAILED',
-            error
-          ));
-          return;
-        }
-
-        console.log('[Browser] Bundled Chromium preflight OK:', String(stdout || stderr || '').trim());
-        resolve(true);
-      }
-    );
-  });
-}
-
-async function getBundledChromiumPreflightStatus(executablePath) {
-  try {
-    await verifyBundledChromiumExecutable(executablePath);
-    return { ok: true, error: '' };
-  } catch (error) {
-    console.warn('[Browser] Bundled Chromium --version preflight failed, continuing with Playwright launch test:', error.message);
-    return {
-      ok: false,
-      error: error.message,
-    };
-  }
-}
-
 function createLaunchOptions(executablePath, options = {}) {
-  const headless = Boolean(options.headless);
-
   return {
-    headless,
-    viewport: headless ? { width: 1280, height: 720 } : null,
+    headless: false,
+    viewport: null,
     executablePath,
+    timeout: 60000,
     args: [
-      '--no-first-run',
-      '--no-default-browser-check',
       '--disable-blink-features=AutomationControlled',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
-      '--disable-features=CalculateNativeWinOcclusion',
-      '--disable-infobars',
-      '--disable-session-crashed-bubble',
-      '--hide-crash-restore-bubble',
     ],
     ignoreDefaultArgs: ['--enable-automation'],
   };
-}
-
-async function smokeTestChromiumLaunch(executablePath) {
-  const smokeRoot = path.join(DATA_ROOT_DIR, 'chromium-smoke-tests');
-  const smokeDir = path.join(smokeRoot, `test-${process.pid}-${Date.now()}`);
-  let context = null;
-
-  await fs.promises.mkdir(smokeDir, { recursive: true });
-
-  try {
-    context = await withTimeout(
-      chromium.launchPersistentContext(smokeDir, createLaunchOptions(executablePath, { headless: true })),
-      30000,
-      'Timed out launching Chromium with a clean temporary profile.'
-    );
-    return true;
-  } finally {
-    if (context) {
-      await context.close().catch(() => {});
-    }
-    await fs.promises.rm(smokeDir, { recursive: true, force: true }).catch(() => {});
-  }
 }
 
 function isProfileAlreadyOpenError(error) {
@@ -221,83 +131,6 @@ function isProfileAlreadyOpenError(error) {
       /Target page, context or browser has been closed/i.test(message)
     )
   );
-}
-
-function isProfileLaunchError(error) {
-  const message = getErrorDetails(error);
-
-  return (
-    isProfileAlreadyOpenError(error) ||
-    /profile|user data dir|processsingleton|singleton|lock/i.test(message) ||
-    /target page, context or browser has been closed|browser has been closed/i.test(message) ||
-    /Timed out launching bundled Chromium|Timed out launching Chromium/i.test(message)
-  );
-}
-
-async function quarantineProfileDir(userDataDir) {
-  if (!fs.existsSync(userDataDir)) {
-    await fs.promises.mkdir(userDataDir, { recursive: true });
-    return '';
-  }
-
-  const parentDir = path.dirname(userDataDir);
-  const baseName = path.basename(userDataDir);
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  await fs.promises.mkdir(parentDir, { recursive: true });
-
-  for (let index = 0; index < 20; index += 1) {
-    const suffix = index === 0 ? stamp : `${stamp}-${index}`;
-    const backupDir = path.join(parentDir, `${baseName}.broken-${suffix}`);
-
-    if (fs.existsSync(backupDir)) {
-      continue;
-    }
-
-    await fs.promises.rename(userDataDir, backupDir);
-    await fs.promises.mkdir(userDataDir, { recursive: true });
-    return backupDir;
-  }
-
-  await fs.promises.rm(userDataDir, { recursive: true, force: true });
-  await fs.promises.mkdir(userDataDir, { recursive: true });
-  return '';
-}
-
-async function recoverProfileAndCreateContext(userDataDir, originalError) {
-  const executablePath = findBundledChromiumExecutable();
-  if (!executablePath) {
-    throw createFriendlyBrowserError(
-      getChromiumPreflightFailureMessage(null, executablePath),
-      'BUNDLED_CHROMIUM_NOT_FOUND'
-    );
-  }
-
-  await getBundledChromiumPreflightStatus(executablePath);
-
-  try {
-    await smokeTestChromiumLaunch(executablePath);
-  } catch (smokeError) {
-    throw createFriendlyBrowserError(
-      `Chromium binary works with --version, but Playwright cannot open a clean Chromium profile. Try extracting ScriptForge to C:\\ScriptForge, install Microsoft Visual C++ Redistributable 2015-2022 x64, then open again. Details: ${getErrorDetails(smokeError).slice(0, 600)}`,
-      'BUNDLED_CHROMIUM_PLAYWRIGHT_LAUNCH_FAILED',
-      smokeError
-    );
-  }
-
-  const backupDir = await quarantineProfileDir(userDataDir);
-
-  try {
-    const context = await createPersistentContext(userDataDir);
-    context.__scriptforgeProfileReset = backupDir || true;
-    console.warn('[Browser] Recovered Chromium launch by resetting profile:', backupDir || userDataDir);
-    return context;
-  } catch (resetError) {
-    throw createFriendlyBrowserError(
-      `Chromium opens with a clean test profile, but ScriptForge still cannot open the reset profile. Original: ${getErrorDetails(originalError).slice(0, 300)} | After reset: ${getErrorDetails(resetError).slice(0, 300)}`,
-      'BROWSER_PROFILE_RESET_FAILED',
-      resetError
-    );
-  }
 }
 
 function toFriendlyBrowserLaunchError(error) {
@@ -486,7 +319,6 @@ async function createPersistentContext(userDataDir) {
 
   if (executablePath) {
     console.log('[Browser] Using bundled Chromium executable:', executablePath);
-    await getBundledChromiumPreflightStatus(executablePath);
   } else {
     throw createFriendlyBrowserError(
       getChromiumPreflightFailureMessage(null, executablePath),
@@ -494,11 +326,7 @@ async function createPersistentContext(userDataDir) {
     );
   }
 
-  return withTimeout(
-    chromium.launchPersistentContext(userDataDir, createLaunchOptions(executablePath)),
-    60000,
-    'Timed out launching bundled Chromium.'
-  );
+  return chromium.launchPersistentContext(userDataDir, createLaunchOptions(executablePath));
 }
 
 async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
@@ -511,7 +339,6 @@ async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
   const removedLocks = await clearProfileLockFiles(userDataDir);
   const unblockResult = await unblockPortableFiles();
   const executablePath = findBundledChromiumExecutable();
-  let preflightStatus = { ok: false, error: '' };
 
   if (!executablePath) {
     throw createFriendlyBrowserError(
@@ -520,9 +347,6 @@ async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
     );
   }
 
-  preflightStatus = await getBundledChromiumPreflightStatus(executablePath);
-  await smokeTestChromiumLaunch(executablePath);
-
   return {
     executablePath,
     closedProcessIds,
@@ -530,8 +354,6 @@ async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
     unblockedFiles: unblockResult.count,
     unblockOk: unblockResult.ok,
     unblockError: unblockResult.error,
-    preflightOk: preflightStatus.ok,
-    preflightError: preflightStatus.error,
   };
 }
 
@@ -596,27 +418,22 @@ async function launchBrowser(options = {}) {
   try {
     context = await createPersistentContext(userDataDir);
   } catch (error) {
-    if (!recoverProfileLock || !isProfileLaunchError(error)) {
+    if (!recoverProfileLock || !isProfileAlreadyOpenError(error)) {
       throw toFriendlyBrowserLaunchError(error);
     }
 
-    console.warn('[Browser] Chromium profile launch failed. Closing stale process and retrying before profile reset...');
+    console.warn('[Browser] Existing Chromium profile session detected. Closing stale profile process and retrying...');
     const closedProcessIds = await closeExistingProfileBrowsers(userDataDir);
     console.warn(
       '[Browser] Closed stale profile process ids:',
       closedProcessIds.length ? closedProcessIds.join(', ') : 'none'
     );
-    await clearProfileLockFiles(userDataDir);
     await sleep(1200);
 
     try {
       context = await createPersistentContext(userDataDir);
     } catch (retryError) {
-      if (!isProfileLaunchError(retryError)) {
-        throw toFriendlyBrowserLaunchError(retryError);
-      }
-
-      context = await recoverProfileAndCreateContext(userDataDir, retryError);
+      throw toFriendlyBrowserLaunchError(retryError);
     }
   }
 

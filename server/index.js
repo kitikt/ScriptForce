@@ -183,6 +183,14 @@ function emitPipelineSnapshot(socket) {
   });
 }
 
+function emitPipelineJobUpdate(job) {
+  io.emit('pipeline_job_update', {
+    job: getPublicJob(job),
+    activeCount: getActivePipelineCount(),
+    maxActivePipelines: MAX_ACTIVE_PIPELINES,
+  });
+}
+
 async function loadActiveProfile() {
   const active = await getActiveProfile();
   activeProfile = active.profile;
@@ -528,10 +536,9 @@ async function startPipelineJob(socket, config) {
     profileLabel: profile.label,
   };
   const pipelineId = randomUUID();
-  const page = await profileSessionManager.createPipelinePage(profile, socket);
   const job = {
     pipelineId,
-    page,
+    page: null,
     config: normalizedConfig,
     status: 'starting',
     currentStep: 0,
@@ -562,17 +569,37 @@ async function startPipelineJob(socket, config) {
 
   const jobSocket = createJobSocket(socket, job);
 
-  runPipeline(page, normalizedConfig, jobSocket, {
-    pipelineId,
-    shouldStop: () => job.stopped,
-  })
-    .then(() => {
+  (async () => {
+    let page = null;
+
+    try {
+      job.statusMessage = 'Dang mo tab Claude cho pipeline...';
+      emitPipelineJobUpdate(job);
+
+      page = await profileSessionManager.createPipelinePage(profile, socket);
+      job.page = page;
+
+      if (job.stopped) {
+        job.status = 'stopped';
+        job.statusMessage = 'Pipeline da dung.';
+        job.finishedAt = new Date().toISOString();
+        return;
+      }
+
+      job.status = 'running';
+      job.statusMessage = 'Pipeline dang chay.';
+      emitPipelineJobUpdate(job);
+
+      await runPipeline(page, normalizedConfig, jobSocket, {
+        pipelineId,
+        shouldStop: () => job.stopped,
+      });
+
       if (!job.finishedAt) {
         job.status = job.stopped ? 'stopped' : 'done';
         job.finishedAt = new Date().toISOString();
       }
-    })
-    .catch((error) => {
+    } catch (error) {
       if (job.stopped) {
         job.status = 'stopped';
         job.statusMessage = 'Pipeline da dung.';
@@ -593,7 +620,7 @@ async function startPipelineJob(socket, config) {
       job.statusMessage = getClientErrorMessage(error);
       job.errorStep = job.currentStep || 0;
       try {
-        job.resumeUrl = isBrowserPageAlive(page) ? page.url() : job.resumeUrl;
+        job.resumeUrl = isBrowserPageAlive(job.page) ? job.page.url() : job.resumeUrl;
       } catch {
         // Keep the previous resume URL if the page is already gone.
       }
@@ -602,18 +629,19 @@ async function startPipelineJob(socket, config) {
         pipelineId,
         error: getClientErrorMessage(error),
       });
-    })
-    .finally(async () => {
+    } finally {
       if (!job.finishedAt) {
         job.finishedAt = new Date().toISOString();
       }
-      await page.close().catch(() => {});
+      await job.page?.close?.().catch(() => {});
+      emitPipelineJobUpdate(job);
       io.emit('pipeline_capacity', {
         activeCount: getActivePipelineCount(),
         maxActivePipelines: MAX_ACTIVE_PIPELINES,
       });
       profileSessionManager.scheduleIdleClose(job.profileId);
-    });
+    }
+  })();
 }
 
 function getResumeStepNumber(job) {

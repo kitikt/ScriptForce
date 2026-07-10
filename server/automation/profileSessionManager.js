@@ -117,6 +117,24 @@ function createProfileSessionManager(options = {}) {
     });
   }
 
+  async function cleanupFailedSession(session) {
+    clearIdleTimer(session);
+    const context = session.context;
+    session.closing = true;
+    session.context = null;
+    session.controlPage = null;
+    session.usagePage = null;
+    session.responseBusy = false;
+    session.responseOwner = null;
+    session.waitingResponses = 0;
+
+    if (context) {
+      await context.close().catch(() => {});
+    }
+
+    session.closing = false;
+  }
+
   async function connect(profile, socket = io, options = {}) {
     const session = getOrCreate(profile);
     const focusWindow = Boolean(options.focusWindow);
@@ -152,9 +170,6 @@ function createProfileSessionManager(options = {}) {
         });
         session.context = context;
         session.controlPage = page;
-        if (context.__scriptforgeProfileReset) {
-          socket?.emit('status', 'Da reset profile Chromium bi loi. Vui long dang nhap Claude lai tren cua so Chromium moi.');
-        }
         attachCloseHandler(session);
         await waitForLogin(page);
         const provider = createClaudeWebProvider(page);
@@ -164,6 +179,7 @@ function createProfileSessionManager(options = {}) {
         emitSession(session);
         return session;
       } catch (error) {
+        await cleanupFailedSession(session);
         session.status = 'error';
         session.error = getClientErrorMessage(error);
         emitSession(session);
