@@ -23,6 +23,16 @@ function withTimeout(promise, timeoutMs, message) {
   });
 }
 
+function getErrorDetails(error) {
+  return [
+    error?.message,
+    error?.stderr,
+    error?.stdout,
+    error?.code ? `code=${error.code}` : '',
+    error?.signal ? `signal=${error.signal}` : '',
+  ].filter(Boolean).join(' | ');
+}
+
 function createFriendlyBrowserError(message, code, cause = null) {
   const error = new Error(message);
   error.code = code;
@@ -84,13 +94,7 @@ function findBundledChromiumExecutable() {
 }
 
 function getChromiumPreflightFailureMessage(error, executablePath) {
-  const rawDetails = [
-    error?.message,
-    error?.stderr,
-    error?.stdout,
-    error?.code ? `code=${error.code}` : '',
-    error?.signal ? `signal=${error.signal}` : '',
-  ].filter(Boolean).join(' | ');
+  const rawDetails = getErrorDetails(error);
   const details = rawDetails.slice(0, 600);
   const lowerDetails = rawDetails.toLowerCase();
   const executableLine = executablePath ? `Chrome: ${executablePath}` : 'Chrome: không tìm thấy chrome.exe trong portable.';
@@ -150,6 +154,45 @@ function verifyBundledChromiumExecutable(executablePath) {
   });
 }
 
+function createLaunchOptions(executablePath) {
+  return {
+    headless: false,
+    viewport: null,
+    executablePath,
+    args: [
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-gpu',
+      '--disable-dev-shm-usage',
+      '--disable-features=CalculateNativeWinOcclusion',
+    ],
+    ignoreDefaultArgs: ['--enable-automation'],
+  };
+}
+
+async function smokeTestChromiumLaunch(executablePath) {
+  const smokeRoot = path.join(DATA_ROOT_DIR, 'chromium-smoke-tests');
+  const smokeDir = path.join(smokeRoot, `test-${process.pid}-${Date.now()}`);
+  let context = null;
+
+  await fs.promises.mkdir(smokeDir, { recursive: true });
+
+  try {
+    context = await withTimeout(
+      chromium.launchPersistentContext(smokeDir, createLaunchOptions(executablePath)),
+      30000,
+      'Timed out launching Chromium with a clean temporary profile.'
+    );
+    return true;
+  } finally {
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    await fs.promises.rm(smokeDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 function isProfileAlreadyOpenError(error) {
   const message = error?.message || '';
 
@@ -160,6 +203,76 @@ function isProfileAlreadyOpenError(error) {
       /Target page, context or browser has been closed/i.test(message)
     )
   );
+}
+
+function isProfileLaunchError(error) {
+  const message = getErrorDetails(error);
+
+  return (
+    isProfileAlreadyOpenError(error) ||
+    /profile|user data dir|processsingleton|singleton|lock/i.test(message) ||
+    /target page, context or browser has been closed|browser has been closed/i.test(message) ||
+    /Timed out launching bundled Chromium|Timed out launching Chromium/i.test(message)
+  );
+}
+
+async function quarantineProfileDir(userDataDir) {
+  if (!fs.existsSync(userDataDir)) {
+    await fs.promises.mkdir(userDataDir, { recursive: true });
+    return '';
+  }
+
+  const parentDir = path.dirname(userDataDir);
+  const baseName = path.basename(userDataDir);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  await fs.promises.mkdir(parentDir, { recursive: true });
+
+  for (let index = 0; index < 20; index += 1) {
+    const suffix = index === 0 ? stamp : `${stamp}-${index}`;
+    const backupDir = path.join(parentDir, `${baseName}.broken-${suffix}`);
+
+    if (fs.existsSync(backupDir)) {
+      continue;
+    }
+
+    await fs.promises.rename(userDataDir, backupDir);
+    await fs.promises.mkdir(userDataDir, { recursive: true });
+    return backupDir;
+  }
+
+  await fs.promises.rm(userDataDir, { recursive: true, force: true });
+  await fs.promises.mkdir(userDataDir, { recursive: true });
+  return '';
+}
+
+async function recoverProfileAndCreateContext(userDataDir, originalError) {
+  const executablePath = findBundledChromiumExecutable();
+  await verifyBundledChromiumExecutable(executablePath);
+
+  try {
+    await smokeTestChromiumLaunch(executablePath);
+  } catch (smokeError) {
+    throw createFriendlyBrowserError(
+      `Chromium binary works with --version, but Playwright cannot open a clean Chromium profile. Try extracting ScriptForge to C:\\ScriptForge, install Microsoft Visual C++ Redistributable 2015-2022 x64, then open again. Details: ${getErrorDetails(smokeError).slice(0, 600)}`,
+      'BUNDLED_CHROMIUM_PLAYWRIGHT_LAUNCH_FAILED',
+      smokeError
+    );
+  }
+
+  const backupDir = await quarantineProfileDir(userDataDir);
+
+  try {
+    const context = await createPersistentContext(userDataDir);
+    context.__scriptforgeProfileReset = backupDir || true;
+    console.warn('[Browser] Recovered Chromium launch by resetting profile:', backupDir || userDataDir);
+    return context;
+  } catch (resetError) {
+    throw createFriendlyBrowserError(
+      `Chromium opens with a clean test profile, but ScriptForge still cannot open the reset profile. Original: ${getErrorDetails(originalError).slice(0, 300)} | After reset: ${getErrorDetails(resetError).slice(0, 300)}`,
+      'BROWSER_PROFILE_RESET_FAILED',
+      resetError
+    );
+  }
 }
 
 function toFriendlyBrowserLaunchError(error) {
@@ -345,22 +458,10 @@ do {
 
 async function createPersistentContext(userDataDir) {
   const executablePath = findBundledChromiumExecutable();
-  const args = [
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
-  ];
-  const launchOptions = {
-    headless: false,
-    viewport: null,
-    args,
-    ignoreDefaultArgs: ['--enable-automation'],
-  };
 
   if (executablePath) {
     console.log('[Browser] Using bundled Chromium executable:', executablePath);
     await verifyBundledChromiumExecutable(executablePath);
-    launchOptions.executablePath = executablePath;
   } else {
     throw createFriendlyBrowserError(
       getChromiumPreflightFailureMessage(null, executablePath),
@@ -369,7 +470,7 @@ async function createPersistentContext(userDataDir) {
   }
 
   return withTimeout(
-    chromium.launchPersistentContext(userDataDir, launchOptions),
+    chromium.launchPersistentContext(userDataDir, createLaunchOptions(executablePath)),
     60000,
     'Timed out launching bundled Chromium.'
   );
@@ -387,6 +488,7 @@ async function repairChromiumLaunch(userDataDir = BROWSER_USER_DATA_DIR) {
   const executablePath = findBundledChromiumExecutable();
 
   await verifyBundledChromiumExecutable(executablePath);
+  await smokeTestChromiumLaunch(executablePath);
 
   return {
     executablePath,
@@ -452,22 +554,27 @@ async function launchBrowser(options = {}) {
   try {
     context = await createPersistentContext(userDataDir);
   } catch (error) {
-    if (!recoverProfileLock || !isProfileAlreadyOpenError(error)) {
+    if (!recoverProfileLock || !isProfileLaunchError(error)) {
       throw toFriendlyBrowserLaunchError(error);
     }
 
-    console.warn('[Browser] Existing Chromium profile session detected. Closing stale profile process and retrying...');
+    console.warn('[Browser] Chromium profile launch failed. Closing stale process and retrying before profile reset...');
     const closedProcessIds = await closeExistingProfileBrowsers(userDataDir);
     console.warn(
       '[Browser] Closed stale profile process ids:',
       closedProcessIds.length ? closedProcessIds.join(', ') : 'none'
     );
+    await clearProfileLockFiles(userDataDir);
     await sleep(1200);
 
     try {
       context = await createPersistentContext(userDataDir);
     } catch (retryError) {
-      throw toFriendlyBrowserLaunchError(retryError);
+      if (!isProfileLaunchError(retryError)) {
+        throw toFriendlyBrowserLaunchError(retryError);
+      }
+
+      context = await recoverProfileAndCreateContext(userDataDir, retryError);
     }
   }
 

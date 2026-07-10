@@ -152,6 +152,9 @@ function createProfileSessionManager(options = {}) {
         });
         session.context = context;
         session.controlPage = page;
+        if (context.__scriptforgeProfileReset) {
+          socket?.emit('status', 'Da reset profile Chromium bi loi. Vui long dang nhap Claude lai tren cua so Chromium moi.');
+        }
         attachCloseHandler(session);
         await waitForLogin(page);
         const provider = createClaudeWebProvider(page);
